@@ -200,3 +200,207 @@ class TestQueryTradesAPI:
             assert data["total_count"] == 2
             for trade in data["trades"]:
                 assert trade["market_id"] == "market1"
+
+
+class TestQueryTradesWithMarketsAPI:
+    """Tests for the /api/query/trades_with_markets endpoint."""
+
+    @pytest.fixture
+    def setup_bootstrap_with_expiry(
+        self, client: TestClient
+    ) -> tuple[Path, Path, Path]:
+        """Set up bootstrap data with varied expiry dates for testing days_to_exp."""
+        import tempfile
+
+        tmpdir = tempfile.mkdtemp()
+        tmp_path = Path(tmpdir)
+
+        # Create markets with specific closedTime values
+        markets_csv = tmp_path / "markets.csv"
+        markets_csv.write_text(
+            """createdAt,id,question,answer1,answer2,neg_risk,market_slug,token1,token2,condition_id,volume,ticker,closedTime,description,category
+2024-01-01 00:00:00,market1,Will A win?,Yes,No,false,market-a,tok1a,tok1b,cond1,1000.0,MKT1,2024-12-31 00:00:00,Market A,Sports
+2024-01-01 00:00:00,market2,Will B win?,Yes,No,false,market-b,tok2a,tok2b,cond2,2000.0,MKT2,2024-06-30 00:00:00,Market B,Sports
+"""
+        )
+
+        # Create trades at known timestamps relative to closedTime
+        # market1: closedTime 2024-12-31, trade at 2024-10-02 => ~90 days
+        # market2: closedTime 2024-06-30, trade at 2024-05-31 => ~30 days
+        trades_csv = tmp_path / "trades.csv"
+        trades_csv.write_text(
+            """timestamp,market_id,maker,taker,nonusdc_side,maker_direction,taker_direction,price,usd_amount,token_amount,transactionHash
+2024-10-02 00:00:00,market1,0xmaker1,0xtaker1,YES,buy,sell,0.65,100.0,153.84,0xhash1
+2024-05-31 00:00:00,market2,0xmaker2,0xtaker2,YES,buy,sell,0.50,150.0,300.0,0xhash2
+2024-01-15 00:00:00,market1,0xmaker3,0xtaker3,NO,sell,buy,0.35,50.0,142.85,0xhash3
+"""
+        )
+
+        order_filled_csv = tmp_path / "orderFilled.csv"
+        order_filled_csv.write_text(
+            """timestamp,maker,makerAssetId,makerAmountFilled,taker,takerAssetId,takerAmountFilled,transactionHash
+2024-01-15 10:00:00,0xmaker1,asset1,100.0,0xtaker1,asset2,153.84,0xhash1
+"""
+        )
+
+        parquet_dir = tmp_path / "parquet"
+        duckdb_path = tmp_path / "test.duckdb"
+        metadata_path = tmp_path / "metadata.db"
+
+        from polymkt.pipeline.bootstrap import run_bootstrap
+
+        run_bootstrap(
+            markets_csv=markets_csv,
+            trades_csv=trades_csv,
+            order_filled_csv=order_filled_csv,
+            parquet_dir=parquet_dir,
+            duckdb_path=duckdb_path,
+            metadata_db_path=metadata_path,
+        )
+
+        return parquet_dir, duckdb_path, metadata_path
+
+    def test_query_trades_with_markets_basic(
+        self, client: TestClient, setup_bootstrap_with_expiry: tuple[Path, Path, Path]
+    ) -> None:
+        """Test basic query returns trades with market data and days_to_exp."""
+        parquet_dir, duckdb_path, metadata_path = setup_bootstrap_with_expiry
+
+        with patch("polymkt.api.main.settings") as mock_settings:
+            mock_settings.parquet_dir = parquet_dir
+            mock_settings.duckdb_path = duckdb_path
+            mock_settings.metadata_db_path = metadata_path
+
+            response = client.post(
+                "/api/query/trades_with_markets",
+                json={},
+            )
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["total_count"] == 3
+            assert data["count"] == 3
+
+            # Verify trades include days_to_exp
+            for trade in data["trades"]:
+                assert "days_to_exp" in trade
+                assert "question" in trade
+                assert "category" in trade
+
+    def test_query_trades_with_markets_filter_by_days_to_exp_range(
+        self, client: TestClient, setup_bootstrap_with_expiry: tuple[Path, Path, Path]
+    ) -> None:
+        """Test filtering by days_to_exp range (89-91)."""
+        parquet_dir, duckdb_path, metadata_path = setup_bootstrap_with_expiry
+
+        with patch("polymkt.api.main.settings") as mock_settings:
+            mock_settings.parquet_dir = parquet_dir
+            mock_settings.duckdb_path = duckdb_path
+            mock_settings.metadata_db_path = metadata_path
+
+            response = client.post(
+                "/api/query/trades_with_markets",
+                json={
+                    "days_to_exp_min": 89,
+                    "days_to_exp_max": 91,
+                },
+            )
+
+            assert response.status_code == 200
+            data = response.json()
+            # Should get the ~90 day trade
+            assert data["total_count"] == 1
+            trade = data["trades"][0]
+            assert trade["market_id"] == "market1"
+            assert 89 <= trade["days_to_exp"] <= 91
+
+    def test_query_trades_with_markets_filter_by_days_to_exp_max(
+        self, client: TestClient, setup_bootstrap_with_expiry: tuple[Path, Path, Path]
+    ) -> None:
+        """Test filtering by days_to_exp_max only."""
+        parquet_dir, duckdb_path, metadata_path = setup_bootstrap_with_expiry
+
+        with patch("polymkt.api.main.settings") as mock_settings:
+            mock_settings.parquet_dir = parquet_dir
+            mock_settings.duckdb_path = duckdb_path
+            mock_settings.metadata_db_path = metadata_path
+
+            response = client.post(
+                "/api/query/trades_with_markets",
+                json={
+                    "days_to_exp_max": 50,
+                },
+            )
+
+            assert response.status_code == 200
+            data = response.json()
+            # Should get the ~30 day trade
+            for trade in data["trades"]:
+                assert trade["days_to_exp"] <= 50
+
+    def test_query_trades_with_markets_combined_filters(
+        self, client: TestClient, setup_bootstrap_with_expiry: tuple[Path, Path, Path]
+    ) -> None:
+        """Test combining market_id and days_to_exp filters."""
+        parquet_dir, duckdb_path, metadata_path = setup_bootstrap_with_expiry
+
+        with patch("polymkt.api.main.settings") as mock_settings:
+            mock_settings.parquet_dir = parquet_dir
+            mock_settings.duckdb_path = duckdb_path
+            mock_settings.metadata_db_path = metadata_path
+
+            response = client.post(
+                "/api/query/trades_with_markets",
+                json={
+                    "market_id": "market1",
+                    "days_to_exp_min": 89,
+                    "days_to_exp_max": 91,
+                },
+            )
+
+            assert response.status_code == 200
+            data = response.json()
+            assert data["total_count"] == 1
+            trade = data["trades"][0]
+            assert trade["market_id"] == "market1"
+
+    def test_query_trades_with_markets_no_data(self, client: TestClient) -> None:
+        """Test querying before bootstrap returns 400."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("polymkt.api.main.settings") as mock_settings:
+                mock_settings.parquet_dir = Path(tmpdir) / "parquet"
+                response = client.post(
+                    "/api/query/trades_with_markets",
+                    json={},
+                )
+                assert response.status_code == 400
+                assert "Run bootstrap first" in response.json()["detail"]
+
+    def test_query_trades_with_markets_order_by_days_to_exp(
+        self, client: TestClient, setup_bootstrap_with_expiry: tuple[Path, Path, Path]
+    ) -> None:
+        """Test ordering by days_to_exp."""
+        parquet_dir, duckdb_path, metadata_path = setup_bootstrap_with_expiry
+
+        with patch("polymkt.api.main.settings") as mock_settings:
+            mock_settings.parquet_dir = parquet_dir
+            mock_settings.duckdb_path = duckdb_path
+            mock_settings.metadata_db_path = metadata_path
+
+            response = client.post(
+                "/api/query/trades_with_markets",
+                json={
+                    "order_by": "days_to_exp",
+                    "order_dir": "ASC",
+                },
+            )
+
+            assert response.status_code == 200
+            data = response.json()
+            # Verify ordering
+            values = [
+                t["days_to_exp"]
+                for t in data["trades"]
+                if t["days_to_exp"] is not None
+            ]
+            assert values == sorted(values)

@@ -44,6 +44,21 @@ class TradesQueryRequest(BaseModel):
     order_dir: str = "ASC"
 
 
+class TradesWithMarketsQueryRequest(BaseModel):
+    """Request for querying trades with market data and days_to_exp."""
+
+    market_id: str | None = None
+    market_ids: list[str] | None = None
+    start_time: str | None = None
+    end_time: str | None = None
+    days_to_exp_min: float | None = None
+    days_to_exp_max: float | None = None
+    limit: int = 1000
+    offset: int = 0
+    order_by: str = "timestamp"
+    order_dir: str = "ASC"
+
+
 class TradesQueryResponse(BaseModel):
     """Response for trades query."""
 
@@ -147,3 +162,61 @@ def get_watermarks() -> dict[str, Any]:
     """Get all current watermarks."""
     metadata_store = MetadataStore(settings.metadata_db_path)
     return metadata_store.get_all_watermarks()
+
+
+@app.post("/api/query/trades_with_markets", response_model=TradesQueryResponse)
+def query_trades_with_markets(
+    request: TradesWithMarketsQueryRequest,
+) -> TradesQueryResponse:
+    """
+    Query trades joined with market data, including the derived days_to_exp field.
+
+    The days_to_exp field is computed as:
+        (market.closed_time - trade.timestamp) in days
+
+    This endpoint supports filtering by days_to_exp range, which is useful for
+    backtesting strategies like "buy at 90 days to expiry".
+
+    Example: Filter trades between 89-91 days to expiry:
+        {"days_to_exp_min": 89, "days_to_exp_max": 91}
+    """
+    # Check if Parquet files exist
+    if not (settings.parquet_dir / "trades.parquet").exists():
+        raise HTTPException(
+            status_code=400,
+            detail="Trades data not available. Run bootstrap first.",
+        )
+    if not (settings.parquet_dir / "markets.parquet").exists():
+        raise HTTPException(
+            status_code=400,
+            detail="Markets data not available. Run bootstrap first.",
+        )
+
+    duckdb_layer = DuckDBLayer(settings.duckdb_path, settings.parquet_dir)
+    try:
+        # Ensure views exist
+        duckdb_layer.create_views()
+
+        trades, total_count = duckdb_layer.query_trades_with_markets(
+            market_id=request.market_id,
+            market_ids=request.market_ids,
+            start_time=request.start_time,
+            end_time=request.end_time,
+            days_to_exp_min=request.days_to_exp_min,
+            days_to_exp_max=request.days_to_exp_max,
+            limit=request.limit,
+            offset=request.offset,
+            order_by=request.order_by,
+            order_dir=request.order_dir,
+        )
+        has_more = (request.offset + len(trades)) < total_count
+        return TradesQueryResponse(
+            trades=trades,
+            count=len(trades),
+            total_count=total_count,
+            has_more=has_more,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        duckdb_layer.close()

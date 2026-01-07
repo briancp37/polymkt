@@ -157,7 +157,7 @@
         "Verify days_to_exp is persisted in the analytics layer or computed in a view",
         "Verify days_to_exp can be filtered efficiently (e.g., between 89 and 91)"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "functional",

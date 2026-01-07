@@ -195,3 +195,80 @@ Implemented efficient querying for multiple market_ids (100+), enabling research
 - Add Parquet partitioning for query optimization
 - Implement the search indices (BM25 + vector search)
 - Add derived field days_to_exp
+
+---
+
+## 2026-01-06: days_to_exp Derived Field Feature
+
+### What was done:
+Implemented the `days_to_exp` derived field for trades, enabling backtesting strategies that rely on days-to-expiry filtering (e.g., "buy at 90 days to expiry").
+
+### Features implemented:
+1. **`query_trades_with_markets()` method** (`src/polymkt/storage/duckdb_layer.py:240-353`)
+   - Queries from `v_trades_with_markets` view which joins trades to markets
+   - Includes `days_to_exp` derived field: `(closed_time - timestamp) / 86400.0` in days
+   - Supports filtering by `days_to_exp_min` and `days_to_exp_max` parameters
+   - Supports ordering by `days_to_exp` and other market columns (question, category, closed_time)
+   - Full pagination support (limit/offset with total_count)
+
+2. **API endpoint** (`src/polymkt/api/main.py:167-222`)
+   - `POST /api/query/trades_with_markets` endpoint
+   - Request accepts `days_to_exp_min` and `days_to_exp_max` float parameters
+   - Combines with existing filters (market_id, market_ids, time range)
+   - Returns trades with market data (question, category, closed_time) plus days_to_exp
+
+3. **days_to_exp formula** (documented in view definition)
+   - Computed as: `EXTRACT(EPOCH FROM (closed_time - timestamp)) / 86400.0`
+   - Returns NULL when market has no closed_time
+   - Filtering by range excludes NULL values (markets without expiry)
+
+### PRD requirements met:
+- Join trades to markets by market_id ✓
+- Compute days_to_exp = (closedTime - trade_timestamp) in days ✓
+- Verify days_to_exp is correct for known sample timestamps ✓ (comprehensive tests)
+- Verify days_to_exp is persisted/computed in a view ✓ (v_trades_with_markets)
+- Verify days_to_exp can be filtered efficiently (e.g., between 89 and 91) ✓
+
+### Tests added (`tests/test_days_to_exp.py`, `tests/test_api.py`):
+101 tests passing (23 new tests for days_to_exp feature).
+
+**TestDaysToExpCorrectness (5 tests):**
+- `test_days_to_exp_formula`: Verifies ~90 day calculation
+- `test_days_to_exp_180_days`: Verifies ~180 day calculation
+- `test_days_to_exp_30_days`: Verifies ~30 day calculation
+- `test_days_to_exp_null_when_no_closed_time`: NULL handling
+- `test_days_to_exp_includes_market_columns`: Joined columns present
+
+**TestDaysToExpFiltering (6 tests):**
+- `test_filter_by_days_to_exp_min`: Minimum filter
+- `test_filter_by_days_to_exp_max`: Maximum filter
+- `test_filter_by_days_to_exp_range_89_to_91`: PRD requirement
+- `test_filter_days_to_exp_combined_with_market_id`: Combined filters
+- `test_filter_days_to_exp_combined_with_time_range`: Combined filters
+- `test_filter_excludes_null_days_to_exp`: NULL exclusion
+
+**TestDaysToExpOrdering (2 tests):**
+- `test_order_by_days_to_exp_asc`: Ascending order
+- `test_order_by_days_to_exp_desc`: Descending order
+
+**TestDaysToExpPagination (2 tests):**
+- `test_pagination_with_days_to_exp_filter`: Pagination works
+- `test_total_count_with_days_to_exp_filter`: Count correct
+
+**TestDaysToExpValidation (2 tests):**
+- `test_invalid_order_by_column_raises_error`: Validation
+- `test_extended_order_by_columns_available`: New columns work
+
+**TestQueryTradesWithMarketsAPI (6 tests):**
+- API endpoint tests for days_to_exp filtering and ordering
+
+### PRD features marked as passing:
+- Add derived field days_to_exp using markets.closedTime as expiry
+
+### Next steps for future sessions:
+- Implement schema validation for custom columns (category, closedTime, tags) - events join
+- Implement incremental updates with watermark-based fetching
+- Add Parquet partitioning for query optimization
+- Implement the search indices (BM25 + vector search)
+- Implement election group concept for "buy the favorite" backtests
+- Implement backtest v1: buy favorite at 90 days to expiry
