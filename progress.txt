@@ -1863,4 +1863,82 @@ Implemented the poly_data integration feature that adds events update support to
 - Implement Dataset Agent (natural language filters)
 - Implement Backtesting Agent (natural language strategy requests)
 - Implement React frontend for datasets/backtests UX
-- Implement nonfunctional features (cost efficiency, performance, reliability)
+- Implement nonfunctional features (cost efficiency, performance, data quality checks, schema evolution)
+
+---
+
+## 2026-01-07: Reliability Nonfunctional Feature
+
+### What was done:
+Implemented the Reliability nonfunctional feature that ensures the pipeline is resumable and produces clear, structured logs with actionable error messages.
+
+### Features implemented:
+
+1. **Production structlog configuration** (`src/polymkt/logging.py`)
+   - `configure_logging()` - Configures structlog with JSON output for production
+   - `get_logger()` - Returns a structlog logger instance
+   - `create_run_logger()` - Creates a logger with run_id and operation bound to all entries
+   - Adds timestamp, service name, and log level to all entries
+   - Supports both JSON and human-readable console output
+
+2. **Bound logging with run_id** (`src/polymkt/pipeline/update.py`)
+   - All log entries in run_update() now include run_id and operation
+   - Watermarks are logged at start and completion
+   - Entity names are included in warnings for missing CSVs
+   - Log output is valid JSON with structured fields
+
+3. **Custom exception hierarchy with remediation**
+   - `PipelineError` - Base class with message, remediation, entity, and is_retryable
+   - `DataSourceError` - For missing/unreadable source files
+   - `DataValidationError` - For data validation failures with counts
+   - `WatermarkError` - For corrupted watermark state with recovery options
+   - All exceptions include actionable remediation steps
+
+4. **Enhanced error handling in run_update()**
+   - Separate handlers for PipelineError and generic Exception
+   - Error logs include error_type, message, entity, remediation, and is_retryable
+   - Logs include rows_written_before_failure and watermarks_before for debugging
+   - General remediation guidance for unexpected errors
+
+### PRD requirements met:
+- Start an update run and interrupt it mid-way ✓
+- Re-run update ✓
+- Verify it resumes safely without duplicating data ✓ (watermark filtering + deduplication)
+- Verify logs are structured (json) and include run_id and watermark ✓
+- Verify failures provide actionable remediation steps ✓
+
+### Tests added (`tests/test_reliability.py`):
+506 tests total (14 new tests for reliability).
+
+**TestPipelineResumability (3 tests):**
+- `test_update_resumes_without_duplicating_data`: Second run writes nothing (watermark filtering)
+- `test_watermark_advances_correctly`: Watermarks advance and persist
+- `test_partial_write_recoverable`: Partial writes don't corrupt state
+
+**TestStructuredLogging (4 tests):**
+- `test_configure_logging_produces_json`: JSON output is valid
+- `test_create_run_logger_binds_run_id`: run_id bound to all entries
+- `test_run_update_logs_include_run_id`: Update logs include run_id
+- `test_run_update_logs_include_watermarks`: Watermarks are logged
+
+**TestActionableErrorMessages (5 tests):**
+- `test_pipeline_error_includes_remediation`: Base class includes remediation
+- `test_data_source_error_has_path`: Path included in error
+- `test_data_validation_error_has_count`: Invalid count included
+- `test_watermark_error_has_recovery_options`: Recovery options included
+- `test_update_failure_logs_remediation`: Failures log remediation
+
+**TestRunHistoryTracking (2 tests):**
+- `test_run_record_persisted`: Run records saved to metadata
+- `test_run_record_has_all_fields`: All required fields present
+
+### PRD features marked as passing:
+- Reliability: pipeline is resumable and produces clear, structured logs
+
+### Notes for next person:
+- The logging module configures structlog on import - call configure_logging() to override
+- Use create_run_logger() to bind run_id to all log entries in a scope
+- PipelineError subclasses provide specific remediation guidance per error type
+- Watermark-based filtering is the primary mechanism for resumability
+- Deduplication by transaction_hash is the secondary safety net
+- All log output is valid JSON with timestamp, level, service, and run_id

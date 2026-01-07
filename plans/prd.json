@@ -472,7 +472,7 @@
         "Verify logs are structured (json) and include run_id and watermark",
         "Verify failures provide actionable remediation steps"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "nonfunctional",

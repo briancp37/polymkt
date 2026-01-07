@@ -6,6 +6,7 @@ This module implements poly_data-like incremental update logic:
 - Upsert logic for markets with events tag refresh
 - Events update module for refreshing event tags
 - Resumable pipeline that can recover from interruption
+- Structured logging with run_id for traceability
 """
 
 import json
@@ -22,6 +23,7 @@ import pyarrow.parquet as pq
 import structlog
 
 from polymkt.config import settings
+from polymkt.logging import create_run_logger
 from polymkt.models.schemas import RunRecord, UpdateSummary
 from polymkt.pipeline.normalize import (
     normalize_timestamp,
@@ -39,7 +41,86 @@ from polymkt.storage.parquet import (
     TRADES_SCHEMA,
 )
 
+# Module-level logger for functions outside of run_update
 logger = structlog.get_logger()
+
+
+class PipelineError(Exception):
+    """Base class for pipeline errors with remediation guidance."""
+
+    def __init__(
+        self,
+        message: str,
+        remediation: str,
+        entity: str | None = None,
+        is_retryable: bool = False,
+    ):
+        """
+        Initialize a pipeline error with remediation guidance.
+
+        Args:
+            message: Error description
+            remediation: Actionable steps to fix the issue
+            entity: Entity being processed (trades, markets, etc.)
+            is_retryable: Whether the operation can be safely retried
+        """
+        super().__init__(message)
+        self.message = message
+        self.remediation = remediation
+        self.entity = entity
+        self.is_retryable = is_retryable
+
+    def __str__(self) -> str:
+        parts = [self.message]
+        if self.entity:
+            parts.append(f"Entity: {self.entity}")
+        parts.append(f"Remediation: {self.remediation}")
+        if self.is_retryable:
+            parts.append("This operation can be safely retried.")
+        return " | ".join(parts)
+
+
+class DataSourceError(PipelineError):
+    """Error when source data is unavailable or invalid."""
+
+    def __init__(self, message: str, entity: str, path: str):
+        super().__init__(
+            message=message,
+            remediation=f"Verify the source file exists at '{path}' and is readable. "
+            "Check file permissions and ensure the file is not corrupted.",
+            entity=entity,
+            is_retryable=True,
+        )
+        self.path = path
+
+
+class DataValidationError(PipelineError):
+    """Error when data fails validation."""
+
+    def __init__(self, message: str, entity: str, invalid_count: int):
+        super().__init__(
+            message=message,
+            remediation=f"Review the source data for {entity}. {invalid_count} rows failed validation. "
+            "Check for missing required fields, invalid timestamps, or out-of-range values. "
+            "Invalid rows are quarantined and logged for review.",
+            entity=entity,
+            is_retryable=False,
+        )
+        self.invalid_count = invalid_count
+
+
+class WatermarkError(PipelineError):
+    """Error when watermark state is inconsistent."""
+
+    def __init__(self, message: str, entity: str):
+        super().__init__(
+            message=message,
+            remediation=f"The watermark for {entity} may be corrupted. "
+            "Options: 1) Run a full bootstrap to reset state, or "
+            "2) Manually clear the watermark via the metadata API.",
+            entity=entity,
+            is_retryable=False,
+        )
 
 # Column mappings from CSV to our internal schema (same as bootstrap)
 MARKETS_COLUMN_MAPPING = {
@@ -741,11 +822,23 @@ def run_update(
     start_time = datetime.now(timezone.utc)
     timer_start = perf_counter()
 
+    # Create bound logger with run_id for all log entries
+    run_logger = create_run_logger(run_id=run_id, operation="update")
+    run_logger.info(
+        "update_started",
+        markets_csv=str(markets_csv),
+        trades_csv=str(trades_csv),
+        order_filled_csv=str(order_filled_csv),
+        events_csv=str(events_csv),
+        parquet_dir=str(parquet_dir),
+    )
+
     metadata_store = MetadataStore(metadata_db_path)
     parquet_dir.mkdir(parents=True, exist_ok=True)
 
     # Get current watermarks
     watermarks_before = metadata_store.get_all_watermarks()
+    run_logger.info("watermarks_loaded", watermarks=watermarks_before)
 
     # Create initial run record
     run_record = RunRecord(
@@ -769,7 +862,7 @@ def run_update(
         # Process trades
         trades_parquet = parquet_dir / "trades.parquet"
         if trades_csv.exists():
-            logger.info("processing_trades_update", path=str(trades_csv))
+            run_logger.info("processing_trades_update", path=str(trades_csv))
 
             # Read new data from CSV
             trades_table = _read_csv_with_schema(
@@ -809,7 +902,7 @@ def run_update(
                 watermarks_after["trades"] = trades_watermark
 
         else:
-            logger.warning("csv_not_found", path=str(trades_csv))
+            run_logger.warning("csv_not_found", entity="trades", path=str(trades_csv))
             rows_read["trades"] = 0
             rows_written["trades"] = 0
             rows_skipped["trades"] = 0
@@ -818,7 +911,7 @@ def run_update(
         # Process markets
         markets_parquet = parquet_dir / "markets.parquet"
         if markets_csv.exists():
-            logger.info("processing_markets_update", path=str(markets_csv))
+            run_logger.info("processing_markets_update", path=str(markets_csv))
 
             # Read all markets (markets are upserted, not just appended)
             markets_table = _read_csv_with_schema(
@@ -863,7 +956,7 @@ def run_update(
                 watermarks_after["markets"] = markets_watermark
 
         else:
-            logger.warning("csv_not_found", path=str(markets_csv))
+            run_logger.warning("csv_not_found", entity="markets", path=str(markets_csv))
             rows_read["markets"] = 0
             rows_written["markets"] = 0
             rows_skipped["markets"] = 0
@@ -873,7 +966,7 @@ def run_update(
         # Process order filled
         order_filled_parquet = parquet_dir / "order_filled.parquet"
         if order_filled_csv.exists():
-            logger.info("processing_order_filled_update", path=str(order_filled_csv))
+            run_logger.info("processing_order_filled_update", path=str(order_filled_csv))
 
             # Read new data from CSV
             order_filled_table = _read_csv_with_schema(
@@ -919,7 +1012,7 @@ def run_update(
                 watermarks_after["order_filled"] = order_filled_watermark
 
         else:
-            logger.warning("csv_not_found", path=str(order_filled_csv))
+            run_logger.warning("csv_not_found", entity="order_filled", path=str(order_filled_csv))
             rows_read["order_filled"] = 0
             rows_written["order_filled"] = 0
             rows_skipped["order_filled"] = 0
@@ -932,7 +1025,7 @@ def run_update(
         events_updated = False
 
         if events_csv.exists():
-            logger.info("processing_events_update", path=str(events_csv))
+            run_logger.info("processing_events_update", path=str(events_csv))
 
             # Read events from CSV with special JSON tags handling
             events_table = _read_events_csv(events_csv)
@@ -979,7 +1072,7 @@ def run_update(
                 watermarks_after["events"] = events_watermark
 
         else:
-            logger.info("events_csv_not_found", path=str(events_csv))
+            run_logger.info("events_csv_not_found", path=str(events_csv))
             rows_read["events"] = 0
             rows_written["events"] = 0
             rows_skipped["events"] = 0
@@ -990,13 +1083,13 @@ def run_update(
         # This ensures markets.tags is refreshed via the events join
         # Markets' category and closedTime are preserved
         if events_updated and events_parquet.exists() and markets_parquet.exists():
-            logger.info("refreshing_market_tags_after_events_update")
+            run_logger.info("refreshing_market_tags_after_events_update")
             _join_events_tags_to_markets(markets_parquet, events_parquet)
 
         # Refresh DuckDB views if any data was written
         total_written = sum(rows_written.values())
         if total_written > 0:
-            logger.info("refreshing_duckdb_views")
+            run_logger.info("refreshing_duckdb_views")
             duckdb_layer = DuckDBLayer(duckdb_path, parquet_dir)
             try:
                 duckdb_layer.create_views()
@@ -1016,14 +1109,14 @@ def run_update(
         run_record.duration_seconds = duration
         metadata_store.update_run(run_record)
 
-        logger.info(
+        run_logger.info(
             "update_completed",
-            run_id=run_id,
             duration_seconds=duration,
             rows_read=rows_read,
             rows_written=rows_written,
             rows_skipped=rows_skipped,
             rows_updated=rows_updated,
+            watermarks_after=watermarks_after,
         )
 
         return UpdateSummary(
@@ -1039,8 +1132,8 @@ def run_update(
             watermark_after=watermarks_after,
         )
 
-    except Exception as e:
-        # Update run record with failure
+    except PipelineError as e:
+        # Handle pipeline-specific errors with actionable remediation
         duration = perf_counter() - timer_start
         run_record.end_time = datetime.now(timezone.utc)
         run_record.status = "failed"
@@ -1050,5 +1143,44 @@ def run_update(
         run_record.duration_seconds = duration
         metadata_store.update_run(run_record)
 
-        logger.error("update_failed", run_id=run_id, error=str(e))
+        run_logger.error(
+            "update_failed",
+            error_type=type(e).__name__,
+            error_message=e.message,
+            entity=e.entity,
+            remediation=e.remediation,
+            is_retryable=e.is_retryable,
+            rows_written_before_failure=rows_written,
+            watermarks_before=watermarks_before,
+        )
+        raise
+
+    except Exception as e:
+        # Handle unexpected errors with general remediation guidance
+        duration = perf_counter() - timer_start
+        run_record.end_time = datetime.now(timezone.utc)
+        run_record.status = "failed"
+        run_record.rows_read = rows_read
+        run_record.rows_written = rows_written
+        run_record.error_message = str(e)
+        run_record.duration_seconds = duration
+        metadata_store.update_run(run_record)
+
+        # Provide actionable remediation for unexpected errors
+        remediation = (
+            "The pipeline can be safely re-run due to watermark-based deduplication. "
+            "Partial data may have been written. Check the error message and stack trace for details. "
+            "If the error persists, check: 1) Source CSV files exist and are readable, "
+            "2) Parquet output directory is writable, 3) Sufficient disk space available."
+        )
+
+        run_logger.error(
+            "update_failed",
+            error_type=type(e).__name__,
+            error_message=str(e),
+            remediation=remediation,
+            is_retryable=True,
+            rows_written_before_failure=rows_written,
+            watermarks_before=watermarks_before,
+        )
         raise
