@@ -161,6 +161,22 @@ class MarketSearchResult(BaseModel):
     score: float = Field(..., description="BM25 relevance score")
 
 
+class UnifiedMarketSearchResult(BaseModel):
+    """A unified market search result that works for all search modes."""
+
+    id: str = Field(..., description="Market ID")
+    question: str = Field(..., description="Market question")
+    tags: list[str] | None = Field(None, description="Market tags derived from event")
+    category: str | None = Field(None, description="Market category")
+    closed_time: datetime | None = Field(None, description="Market close time")
+    event_id: str | None = Field(None, description="Parent event ID")
+    relevance_score: float = Field(..., description="Relevance score (interpretation depends on mode)")
+    snippet: str | None = Field(None, description="Text snippet with query terms highlighted")
+    # Mode-specific scores (optional, only populated for hybrid mode)
+    bm25_score: float | None = Field(None, description="BM25 score (hybrid mode only)")
+    semantic_score: float | None = Field(None, description="Semantic similarity score (hybrid mode only)")
+
+
 class SemanticSearchResult(BaseModel):
     """A single semantic search result with cosine similarity score."""
 

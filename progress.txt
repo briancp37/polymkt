@@ -998,3 +998,92 @@ Implemented incremental search index updates that detect changed markets and upd
 - Implement backtest v1: buy favorite at 90 days to expiry
 - Implement datasets and backtests persistence
 - Implement poly_data integration for live updates
+
+---
+
+## 2026-01-07: Markets Search API Endpoint with Unified Mode Support
+
+### What was done:
+Implemented the unified Markets Search API endpoint that supports multiple search modes (BM25, semantic, hybrid) with paginated ranked results and metadata needed for UI, including snippet generation with query term highlighting.
+
+### Features implemented:
+1. **Unified search endpoint** (`src/polymkt/api/main.py:383-538`)
+   - `GET /api/markets/search` with mode parameter (bm25, semantic, hybrid)
+   - Default mode is "hybrid" (falls back to bm25 without OpenAI API key)
+   - Validates mode parameter and returns 400 for invalid modes
+   - Graceful fallback from hybrid to BM25 when no OpenAI API key configured
+
+2. **Unified response format** (`src/polymkt/models/schemas.py:164-178`)
+   - `UnifiedMarketSearchResult` with all required UI fields:
+     - id, question, tags, category, closed_time, event_id
+     - relevance_score (interpretation depends on mode)
+     - snippet (text with query terms highlighted)
+     - bm25_score, semantic_score (for hybrid mode only)
+   - `UnifiedSearchResponse` with results, count, total_count, has_more, mode
+
+3. **Snippet generation with highlighting** (`src/polymkt/api/main.py:164-199`)
+   - `generate_snippet()` helper function
+   - Combines question and description for snippet text
+   - Truncates to max_length (default 150 chars)
+   - Case-insensitive highlighting of query terms with ** markers
+   - Ignores single-character terms to avoid over-highlighting
+
+4. **Search filtering and pagination**
+   - Supports category filter
+   - Supports closed_time_min and closed_time_max filters
+   - Stable ordering by relevance_score and market_id for consistent pagination
+   - Returns total_count and has_more for pagination UI
+
+### PRD requirements met:
+- Call GET /api/markets/search?q=election&mode=hybrid&limit=50&offset=0 ✓
+- Response includes market_id, question, tags, category, closedTime, relevance_score, snippet ✓
+- Pagination with offset works correctly ✓
+- Stable ordering across pages for the same query ✓
+- Supports filtering (category, closedTime range) in addition to text search ✓
+
+### Tests added (`tests/test_unified_search_api.py`):
+287 tests total (22 new tests for unified search API).
+
+**TestUnifiedSearchModeParameter (4 tests):**
+- `test_bm25_mode_returns_results`: BM25 mode works
+- `test_default_mode_is_hybrid`: Default mode handling
+- `test_invalid_mode_returns_400`: Invalid mode validation
+- `test_semantic_mode_without_api_key_returns_400`: API key validation
+
+**TestUnifiedSearchResponseFormat (3 tests):**
+- `test_response_includes_all_required_fields`: All UI fields present
+- `test_response_includes_snippet`: Snippet generation
+- `test_relevance_score_is_numeric`: Score type validation
+
+**TestUnifiedSearchPagination (3 tests):**
+- `test_pagination_with_limit_and_offset`: Pagination works
+- `test_has_more_flag_is_correct`: has_more flag accuracy
+- `test_stable_ordering_for_pagination`: Deterministic ordering
+
+**TestUnifiedSearchFilters (3 tests):**
+- `test_filter_by_category`: Category filter
+- `test_filter_by_closed_time_min`: Min date filter
+- `test_filter_by_closed_time_max`: Max date filter
+
+**TestSnippetGeneration (6 tests):**
+- `test_generate_snippet_highlights_query_terms`: Basic highlighting
+- `test_generate_snippet_case_insensitive_highlight`: Case preservation
+- `test_generate_snippet_multiple_terms`: Multiple term highlighting
+- `test_generate_snippet_truncates_long_text`: Truncation behavior
+- `test_generate_snippet_includes_description_if_short_question`: Description inclusion
+- `test_generate_snippet_ignores_single_char_terms`: Single char filtering
+
+**TestUnifiedSearchEdgeCases (3 tests):**
+- `test_empty_query_returns_empty_results`: Empty query handling
+- `test_no_matches_returns_empty_results`: No matches handling
+- `test_missing_parquet_returns_400`: Missing data error handling
+
+### PRD features marked as passing:
+- Markets Search API endpoint returns paginated ranked results with metadata needed for UI
+
+### Next steps for future sessions:
+- Implement incremental updates for events that refresh market tags in search indices
+- Implement election group concept for "buy the favorite" backtests
+- Implement backtest v1: buy favorite at 90 days to expiry
+- Implement datasets and backtests persistence
+- Implement poly_data integration for live updates

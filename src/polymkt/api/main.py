@@ -17,6 +17,7 @@ from polymkt.models.schemas import (
     SearchIndexUpdateResult,
     SearchIndexUpdaterStats,
     SemanticSearchResult,
+    UnifiedMarketSearchResult,
     UpdateSummary,
 )
 from polymkt.pipeline.bootstrap import run_bootstrap
@@ -148,6 +149,54 @@ class BuildHybridIndexResponse(BaseModel):
     semantic_markets_indexed: int
     embedding_model: str | None
     embedding_dimensions: int | None
+
+
+class UnifiedSearchResponse(BaseModel):
+    """Response for unified market search supporting all modes."""
+
+    results: list[UnifiedMarketSearchResult]
+    count: int
+    total_count: int
+    has_more: bool
+    mode: str  # bm25, semantic, or hybrid
+
+
+def generate_snippet(question: str, description: str | None, query: str, max_length: int = 150) -> str:
+    """
+    Generate a snippet with query terms highlighted.
+
+    The snippet is extracted from the question or description, with query terms
+    wrapped in ** for emphasis.
+
+    Args:
+        question: Market question text
+        description: Market description (optional)
+        query: Search query string
+        max_length: Maximum snippet length
+
+    Returns:
+        Snippet with highlighted terms
+    """
+    # Combine text sources, preferring question
+    text = question
+    if description and len(question) < max_length // 2:
+        text = f"{question} - {description}"
+
+    # Truncate if too long
+    if len(text) > max_length:
+        text = text[: max_length - 3] + "..."
+
+    # Highlight query terms (case-insensitive)
+    query_terms = query.lower().split()
+    for term in query_terms:
+        if len(term) >= 2:  # Only highlight terms with 2+ characters
+            import re
+
+            # Case-insensitive replace with highlighted version
+            pattern = re.compile(re.escape(term), re.IGNORECASE)
+            text = pattern.sub(lambda m: f"**{m.group(0)}**", text)
+
+    return text
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -331,25 +380,28 @@ def build_search_index() -> BuildSearchIndexResponse:
         duckdb_layer.close()
 
 
-@app.get("/api/markets/search", response_model=MarketSearchResponse)
+@app.get("/api/markets/search", response_model=UnifiedSearchResponse)
 def search_markets(
     q: str,
+    mode: str = "hybrid",
     limit: int = 50,
     offset: int = 0,
     category: str | None = None,
     closed_time_min: str | None = None,
     closed_time_max: str | None = None,
-) -> MarketSearchResponse:
+) -> UnifiedSearchResponse:
     """
-    Search markets using BM25 full-text search.
+    Search markets with support for multiple search modes.
 
-    This endpoint searches over market.question, market.tags (derived from events),
-    and market.description using DuckDB's FTS extension.
+    This unified search endpoint supports BM25 full-text search, semantic
+    vector search, and hybrid search (combining both with RRF scoring).
 
-    Results are sorted by relevance score (BM25) by default.
+    Results are sorted by relevance score and then by market_id for stable
+    pagination ordering.
 
     Args:
         q: Search query string (required)
+        mode: Search mode - "bm25", "semantic", or "hybrid" (default: "hybrid")
         limit: Maximum results to return (default 50)
         offset: Number of results to skip for pagination (default 0)
         category: Filter by market category (optional)
@@ -357,8 +409,16 @@ def search_markets(
         closed_time_max: Filter by maximum closed_time (optional)
 
     Returns:
-        Paginated search results with relevance scores
+        Paginated search results with relevance scores and snippets
     """
+    # Validate mode parameter
+    valid_modes = ["bm25", "semantic", "hybrid"]
+    if mode not in valid_modes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid mode '{mode}'. Must be one of: {', '.join(valid_modes)}",
+        )
+
     # Check if Parquet files exist
     if not (settings.parquet_dir / "markets.parquet").exists():
         raise HTTPException(
@@ -366,47 +426,111 @@ def search_markets(
             detail="Markets data not available. Run bootstrap first.",
         )
 
+    # Semantic and hybrid modes require OpenAI API key
+    if mode in ["semantic", "hybrid"] and not settings.openai_api_key:
+        if mode == "semantic":
+            raise HTTPException(
+                status_code=400,
+                detail="Semantic search requires OpenAI API key. Set POLYMKT_OPENAI_API_KEY environment variable.",
+            )
+        # For hybrid, fall back to BM25-only silently
+        mode = "bm25"
+
     duckdb_layer = DuckDBLayer(settings.duckdb_path, settings.parquet_dir)
     try:
         # Ensure views exist
         duckdb_layer.create_views()
 
-        # Create search index and build it
-        search_index = MarketSearchIndex(duckdb_layer.conn)
-        search_index.build_index()
+        results_raw: list[dict[str, Any]] = []
+        total_count = 0
 
-        # Perform the search
-        results_raw, total_count = search_index.search(
-            query=q,
-            limit=limit,
-            offset=offset,
-            category=category,
-            closed_time_min=closed_time_min,
-            closed_time_max=closed_time_max,
-        )
-
-        # Convert to response model
-        results = [
-            MarketSearchResult(
-                id=r["id"],
-                question=r["question"],
-                tags=r["tags"] if r["tags"] else None,
-                category=r["category"],
-                closed_time=r["closed_time"],
-                event_id=r["event_id"],
-                score=r["score"],
+        if mode == "bm25":
+            # BM25 full-text search
+            search_index = MarketSearchIndex(duckdb_layer.conn)
+            search_index.build_index()
+            results_raw, total_count = search_index.search(
+                query=q,
+                limit=limit,
+                offset=offset,
+                category=category,
+                closed_time_min=closed_time_min,
+                closed_time_max=closed_time_max,
             )
-            for r in results_raw
-        ]
+        elif mode == "semantic":
+            # Semantic vector search
+            semantic_index = SemanticSearchIndex(
+                conn=duckdb_layer.conn,
+                openai_api_key=settings.openai_api_key,
+                embedding_model=settings.openai_embedding_model,
+                embedding_dimensions=settings.openai_embedding_dimensions,
+            )
+            results_raw, total_count = semantic_index.search(
+                query=q,
+                limit=limit,
+                offset=offset,
+                category=category,
+                closed_time_min=closed_time_min,
+                closed_time_max=closed_time_max,
+            )
+        else:  # hybrid
+            # Hybrid BM25 + semantic search with RRF
+            hybrid_index = HybridSearchIndex(
+                conn=duckdb_layer.conn,
+                openai_api_key=settings.openai_api_key,
+                embedding_model=settings.openai_embedding_model,
+                embedding_dimensions=settings.openai_embedding_dimensions,
+            )
+            results_raw, total_count = hybrid_index.search(
+                query=q,
+                limit=limit,
+                offset=offset,
+                category=category,
+                closed_time_min=closed_time_min,
+                closed_time_max=closed_time_max,
+            )
+
+        # Fetch descriptions for snippet generation
+        market_ids = [r["id"] for r in results_raw]
+        descriptions: dict[str, str | None] = {}
+        if market_ids:
+            placeholders = ", ".join([f"'{mid}'" for mid in market_ids])
+            desc_result = duckdb_layer.conn.execute(f"""
+                SELECT id, description FROM v_markets WHERE id IN ({placeholders})
+            """).fetchall()
+            descriptions = {row[0]: row[1] for row in desc_result}
+
+        # Convert to unified response model with snippets
+        results = []
+        for r in results_raw:
+            description = descriptions.get(r["id"])
+            snippet = generate_snippet(r["question"], description, q)
+
+            results.append(
+                UnifiedMarketSearchResult(
+                    id=r["id"],
+                    question=r["question"],
+                    tags=r.get("tags") if r.get("tags") else None,
+                    category=r.get("category"),
+                    closed_time=r.get("closed_time"),
+                    event_id=r.get("event_id"),
+                    relevance_score=r["score"],
+                    snippet=snippet,
+                    bm25_score=r.get("bm25_score") if mode == "hybrid" else None,
+                    semantic_score=r.get("semantic_score") if mode == "hybrid" else None,
+                )
+            )
 
         has_more = (offset + len(results)) < total_count
-        return MarketSearchResponse(
+        return UnifiedSearchResponse(
             results=results,
             count=len(results),
             total_count=total_count,
             has_more=has_more,
+            mode=mode,
         )
     except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Search failed: {e}")

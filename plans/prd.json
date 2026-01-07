@@ -340,7 +340,7 @@
         "Verify stable ordering across pages for the same query",
         "Verify the endpoint supports filtering (category, closedTime range) in addition to text search"
       ],
-      "passes": false
+      "passes": true
     },  
     {
         "category": "functional",
