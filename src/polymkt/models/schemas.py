@@ -539,3 +539,77 @@ class UnmappedMarketsResult(BaseModel):
     unmapped_market_ids: list[str] = Field(..., description="Markets not in any group")
     total_checked: int = Field(..., description="Total markets checked")
     unmapped_count: int = Field(..., description="Count of unmapped markets")
+
+
+# =============================================================================
+# Favorite signal schemas for "buy the favorite" strategy
+# =============================================================================
+
+
+class FavoriteSignalSchema(BaseModel):
+    """Schema for a favorite signal (highest YES price market at snapshot)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(..., description="Signal ID (UUID)")
+    election_group_id: str = Field(..., description="Election group ID")
+    election_group_name: str = Field(..., description="Election group name")
+    favorite_market_id: str = Field(..., description="Market ID of the favorite")
+    favorite_price: float = Field(..., description="YES price of the favorite at snapshot")
+    favorite_question: str | None = Field(None, description="Market question of the favorite")
+    snapshot_days_to_exp: float = Field(
+        ..., description="Days to expiry at which snapshot was taken"
+    )
+    all_market_prices: dict[str, float] = Field(
+        ..., description="Prices of all markets in the group at snapshot"
+    )
+    computed_at: datetime = Field(..., description="When the signal was computed")
+    created_at: datetime = Field(..., description="When the signal was persisted")
+
+
+class FavoriteComputeRequest(BaseModel):
+    """Request to compute favorite signals."""
+
+    target_days_to_exp: float = Field(
+        90.0, description="Target days to expiry for snapshot"
+    )
+    tolerance: float = Field(
+        0.5, description="+/- tolerance around target days to expiry"
+    )
+    group_ids: list[str] | None = Field(
+        None, description="Specific group IDs to process (None = all groups)"
+    )
+    clear_existing: bool = Field(
+        True, description="Clear existing signals for this snapshot before computing"
+    )
+
+
+class FavoriteComputeResultSchema(BaseModel):
+    """Result of computing favorite signals."""
+
+    signals_computed: int = Field(..., description="Number of signals computed")
+    signals_saved: int = Field(..., description="Number of signals saved to database")
+    groups_processed: int = Field(..., description="Total groups processed")
+    groups_with_data: int = Field(..., description="Groups with trade data at snapshot")
+    groups_without_data: int = Field(..., description="Groups without trade data")
+    total_markets: int = Field(..., description="Total markets across all groups")
+    markets_with_trades: int = Field(..., description="Markets with trades at snapshot")
+    markets_without_trades: int = Field(..., description="Markets without trades")
+    snapshot_days_to_exp: float = Field(..., description="Snapshot days to expiry used")
+    tolerance: float = Field(..., description="Tolerance used")
+
+
+class FavoriteSignalListResponse(BaseModel):
+    """Response for listing favorite signals."""
+
+    signals: list[FavoriteSignalSchema] = Field(..., description="List of favorite signals")
+    count: int = Field(..., description="Number of signals in this response")
+    snapshot_days_to_exp: float = Field(..., description="Snapshot days to expiry queried")
+
+
+class FavoriteSnapshotSummary(BaseModel):
+    """Summary of signals for a specific snapshot."""
+
+    snapshot_days_to_exp: float = Field(..., description="Days to expiry of the snapshot")
+    signal_count: int = Field(..., description="Number of signals at this snapshot")
+    last_computed: datetime = Field(..., description="When signals were last computed")

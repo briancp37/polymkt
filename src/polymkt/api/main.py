@@ -27,6 +27,11 @@ from polymkt.models.schemas import (
     ElectionGroupUpdateRequest,
     ElectionGroupValidationResult,
     EmbeddingStats,
+    FavoriteComputeRequest,
+    FavoriteComputeResultSchema,
+    FavoriteSignalListResponse,
+    FavoriteSignalSchema,
+    FavoriteSnapshotSummary,
     HybridIndexStats,
     HybridSearchResult,
     MarketSearchResult,
@@ -50,6 +55,10 @@ from polymkt.storage.search import MarketSearchIndex
 from polymkt.storage.hybrid_search import HybridSearchIndex
 from polymkt.storage.semantic_search import SemanticSearchIndex
 from polymkt.storage.search_index_updater import SearchIndexUpdater
+from polymkt.signals.favorites import (
+    FavoriteSignalStore,
+    compute_favorites_for_groups,
+)
 
 app = FastAPI(
     title="Polymkt Analytics API",
@@ -1774,3 +1783,231 @@ def get_election_group_for_market(market_id: str) -> ElectionGroupSchema | dict[
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get election group for market: {e}")
+
+
+# =============================================================================
+# Favorite Signal Endpoints
+# =============================================================================
+
+
+@app.post("/api/favorite-signals/compute", response_model=FavoriteComputeResultSchema)
+def compute_favorite_signals(request: FavoriteComputeRequest) -> FavoriteComputeResultSchema:
+    """
+    Compute favorite signals for election groups at a specified snapshot.
+
+    For each election group:
+    1. Get all market IDs in the group
+    2. Query trades at the snapshot time (target_days_to_exp +/- tolerance)
+    3. For each market, get the last trade price before snapshot
+    4. Select the favorite as the market with highest YES price
+    5. Handle ties deterministically (by market_id alphabetically)
+
+    The computed signals are persisted to a SQLite table for use in backtests.
+
+    Args:
+        request: Compute request with target_days_to_exp, tolerance, optional group_ids
+
+    Returns:
+        Compute result with statistics about signals computed
+    """
+    try:
+        # Check that parquet files exist
+        if not settings.parquet_dir.exists():
+            raise HTTPException(
+                status_code=400,
+                detail="Parquet data not found. Run bootstrap first.",
+            )
+
+        # Initialize stores
+        duckdb_layer = DuckDBLayer(settings.duckdb_path, settings.parquet_dir)
+        duckdb_layer.create_views()
+        election_group_store = ElectionGroupStore(settings.metadata_db_path)
+        favorite_store = FavoriteSignalStore(settings.metadata_db_path)
+
+        # Clear existing signals if requested
+        if request.clear_existing:
+            favorite_store.clear_signals_for_snapshot(
+                request.target_days_to_exp,
+                request.tolerance,
+            )
+
+        # Compute favorites
+        result = compute_favorites_for_groups(
+            duckdb_layer=duckdb_layer,
+            election_group_store=election_group_store,
+            target_days_to_exp=request.target_days_to_exp,
+            tolerance=request.tolerance,
+            group_ids=request.group_ids,
+        )
+
+        # Save signals
+        signals_saved = favorite_store.save_signals(result.signals)
+
+        duckdb_layer.close()
+
+        return FavoriteComputeResultSchema(
+            signals_computed=len(result.signals),
+            signals_saved=signals_saved,
+            groups_processed=result.groups_processed,
+            groups_with_data=result.groups_with_data,
+            groups_without_data=result.groups_without_data,
+            total_markets=result.total_markets,
+            markets_with_trades=result.markets_with_trades,
+            markets_without_trades=result.markets_without_trades,
+            snapshot_days_to_exp=result.snapshot_days_to_exp,
+            tolerance=result.tolerance,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to compute favorites: {e}")
+
+
+@app.get("/api/favorite-signals", response_model=FavoriteSignalListResponse)
+def get_favorite_signals(
+    snapshot_days_to_exp: float = 90.0,
+    tolerance: float = 0.5,
+) -> FavoriteSignalListResponse:
+    """
+    Get computed favorite signals for a specific snapshot.
+
+    Args:
+        snapshot_days_to_exp: Target days to expiry for the snapshot
+        tolerance: +/- tolerance for matching snapshot
+
+    Returns:
+        List of favorite signals for the snapshot
+    """
+    try:
+        favorite_store = FavoriteSignalStore(settings.metadata_db_path)
+        signals = favorite_store.get_signals_for_snapshot(snapshot_days_to_exp, tolerance)
+
+        return FavoriteSignalListResponse(
+            signals=[
+                FavoriteSignalSchema(
+                    id=s["id"],
+                    election_group_id=s["election_group_id"],
+                    election_group_name=s["election_group_name"],
+                    favorite_market_id=s["favorite_market_id"],
+                    favorite_price=s["favorite_price"],
+                    favorite_question=s["favorite_question"],
+                    snapshot_days_to_exp=s["snapshot_days_to_exp"],
+                    all_market_prices=s["all_market_prices"],
+                    computed_at=s["computed_at"],
+                    created_at=s["created_at"],
+                )
+                for s in signals
+            ],
+            count=len(signals),
+            snapshot_days_to_exp=snapshot_days_to_exp,
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get favorite signals: {e}")
+
+
+@app.get(
+    "/api/favorite-signals/group/{election_group_id}",
+    response_model=FavoriteSignalSchema | dict[str, str],
+)
+def get_favorite_signal_for_group(
+    election_group_id: str,
+    snapshot_days_to_exp: float = 90.0,
+    tolerance: float = 0.5,
+) -> FavoriteSignalSchema | dict[str, str]:
+    """
+    Get the favorite signal for a specific election group at a snapshot.
+
+    Args:
+        election_group_id: The election group ID
+        snapshot_days_to_exp: Target days to expiry for the snapshot
+        tolerance: +/- tolerance for matching snapshot
+
+    Returns:
+        The favorite signal or a message if not found
+    """
+    try:
+        favorite_store = FavoriteSignalStore(settings.metadata_db_path)
+        signal = favorite_store.get_signal_for_group(
+            election_group_id, snapshot_days_to_exp, tolerance
+        )
+
+        if signal is None:
+            return {
+                "status": "not_found",
+                "message": f"No favorite signal found for group {election_group_id} at snapshot {snapshot_days_to_exp}",
+            }
+
+        return FavoriteSignalSchema(
+            id=signal["id"],
+            election_group_id=signal["election_group_id"],
+            election_group_name=signal["election_group_name"],
+            favorite_market_id=signal["favorite_market_id"],
+            favorite_price=signal["favorite_price"],
+            favorite_question=signal["favorite_question"],
+            snapshot_days_to_exp=signal["snapshot_days_to_exp"],
+            all_market_prices=signal["all_market_prices"],
+            computed_at=signal["computed_at"],
+            created_at=signal["created_at"],
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get favorite signal: {e}")
+
+
+@app.get("/api/favorite-signals/snapshots", response_model=list[FavoriteSnapshotSummary])
+def list_favorite_snapshots() -> list[FavoriteSnapshotSummary]:
+    """
+    List all unique snapshots with computed favorite signals.
+
+    Returns:
+        List of snapshots with signal counts and last computed times
+    """
+    try:
+        favorite_store = FavoriteSignalStore(settings.metadata_db_path)
+        snapshots = favorite_store.list_snapshots()
+
+        return [
+            FavoriteSnapshotSummary(
+                snapshot_days_to_exp=s["snapshot_days_to_exp"],
+                signal_count=s["signal_count"],
+                last_computed=s["last_computed"],
+            )
+            for s in snapshots
+        ]
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list snapshots: {e}")
+
+
+@app.delete("/api/favorite-signals")
+def clear_favorite_signals(
+    snapshot_days_to_exp: float = 90.0,
+    tolerance: float = 0.5,
+) -> dict[str, Any]:
+    """
+    Clear favorite signals for a specific snapshot.
+
+    This is useful before recomputing signals with new parameters.
+
+    Args:
+        snapshot_days_to_exp: Target days to expiry for the snapshot
+        tolerance: +/- tolerance for matching snapshot
+
+    Returns:
+        Number of signals deleted
+    """
+    try:
+        favorite_store = FavoriteSignalStore(settings.metadata_db_path)
+        deleted = favorite_store.clear_signals_for_snapshot(snapshot_days_to_exp, tolerance)
+
+        return {
+            "status": "success",
+            "deleted_count": deleted,
+            "snapshot_days_to_exp": snapshot_days_to_exp,
+            "tolerance": tolerance,
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clear signals: {e}")

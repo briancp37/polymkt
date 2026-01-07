@@ -1532,3 +1532,94 @@ Implemented the election group concept that allows grouping related markets (e.g
 - Implement Dataset Agent (natural language filters)
 - Implement Backtesting Agent (natural language strategy requests)
 - Implement FastAPI endpoints for bootstrap, update, query, dataset CRUD, and backtest execution
+
+---
+
+## 2026-01-07: Favorite Signal Computation Feature
+
+### What was done:
+Implemented the "favorite" signal computation feature that identifies the market with the highest YES price at the 90-days-to-expiry snapshot for each election group. This is the foundational signal for "buy the favorite" backtesting strategies.
+
+### Features implemented:
+1. **Signals module** (`src/polymkt/signals/favorites.py`)
+   - `compute_snapshot_prices()` - Queries trades at a specific days-to-exp window and returns the last trade price for each market
+   - `select_favorite()` - Selects the market with highest YES price, with deterministic tie-breaking by market_id (alphabetically)
+   - `compute_favorites_for_groups()` - Computes favorite signals for all election groups (or specified groups)
+   - `FavoriteSignal` dataclass - Holds all signal data including prices for all markets in the group
+   - `FavoriteComputeResult` dataclass - Statistics about the computation run
+
+2. **FavoriteSignalStore class** (`src/polymkt/signals/favorites.py`)
+   - SQLite-backed persistence for computed favorite signals
+   - `save_signals()` - Persists signals to the database
+   - `get_signals_for_snapshot()` - Retrieves all signals for a specific snapshot (e.g., 90 days)
+   - `get_signal_for_group()` - Retrieves the signal for a specific election group
+   - `clear_signals_for_snapshot()` - Clears signals before recomputing
+   - `list_snapshots()` - Lists all unique snapshots with signal counts
+
+3. **Schema models** (`src/polymkt/models/schemas.py`)
+   - `FavoriteSignalSchema` - Full signal model with all prices
+   - `FavoriteComputeRequest` - Request to compute signals
+   - `FavoriteComputeResultSchema` - Statistics about computation
+   - `FavoriteSignalListResponse` - List response for signals
+   - `FavoriteSnapshotSummary` - Summary for listing snapshots
+
+4. **API endpoints** (`src/polymkt/api/main.py`)
+   - `POST /api/favorite-signals/compute` - Compute favorite signals for all election groups
+   - `GET /api/favorite-signals` - Get signals for a specific snapshot
+   - `GET /api/favorite-signals/group/{group_id}` - Get signal for a specific group
+   - `GET /api/favorite-signals/snapshots` - List all snapshots with signals
+   - `DELETE /api/favorite-signals` - Clear signals for a snapshot
+
+### PRD requirements met:
+- For each market_id, compute snapshot price at (days_to_exp ~= 90) using last trade price ✓
+- For each election_group_id, select the market_id with max YES price at that snapshot ✓
+- Verify the favorite selection is deterministic for a fixed dataset ✓ (comprehensive tests)
+- Verify ties are handled (deterministic tie-break rule) ✓ (alphabetical by market_id)
+- Verify favorites are persisted as a signal table for backtests ✓
+
+### Tests added (`tests/test_favorites.py`):
+463 tests total (21 new tests for favorites feature).
+
+**TestSelectFavorite (4 tests):**
+- `test_select_favorite_returns_highest_price`: Highest price market selected
+- `test_select_favorite_handles_ties_deterministically`: Alphabetical tie-breaking
+- `test_select_favorite_empty_returns_none`: Empty input handling
+- `test_select_favorite_single_market`: Single market handling
+
+**TestComputeSnapshotPrices (3 tests):**
+- `test_compute_snapshot_prices_returns_last_trade`: Last trade price computation
+- `test_compute_snapshot_prices_empty_market_list`: Empty market list
+- `test_compute_snapshot_prices_no_trades_at_snapshot`: No trades case
+
+**TestComputeFavoritesForGroups (3 tests):**
+- `test_compute_favorites_identifies_correct_favorite`: Trump as favorite
+- `test_compute_favorites_includes_all_prices`: All prices included
+- `test_compute_favorites_handles_empty_groups`: Empty group handling
+
+**TestFavoriteSignalStore (5 tests):**
+- `test_store_creates_table`: Table creation
+- `test_save_and_get_signals`: Save and retrieve
+- `test_get_signal_for_group`: Group-specific retrieval
+- `test_clear_signals`: Signal clearing
+- `test_list_snapshots`: Snapshot listing
+
+**TestFavoriteSignalsAPI (5 tests):**
+- `test_compute_favorite_signals`: POST compute endpoint
+- `test_get_favorite_signals`: GET signals endpoint
+- `test_get_favorite_signal_for_group`: GET group signal endpoint
+- `test_list_snapshots`: GET snapshots endpoint
+- `test_clear_favorite_signals`: DELETE signals endpoint
+
+**TestFavoriteDeterminism (1 test):**
+- `test_favorite_selection_is_reproducible`: Multiple runs produce same result
+
+### PRD features marked as passing:
+- Define 'favorite' as highest YES price at the 90-days-to-exp snapshot per election group
+
+### Next steps for future sessions:
+- Implement backtest v1: buy favorite at 90 days to expiry and hold to expiry
+- Implement backtest assumptions (fees/slippage in execution)
+- Implement poly_data integration for live updates
+- Implement Dataset Agent (natural language filters)
+- Implement Backtesting Agent (natural language strategy requests)
+- Implement FastAPI endpoints for the remaining features

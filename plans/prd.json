@@ -181,7 +181,7 @@
         "Verify ties are handled (deterministic tie-break rule)",
         "Verify favorites are persisted as a signal table for backtests"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "functional",
