@@ -1,0 +1,53 @@
+## 2026-01-06: Bootstrap Import Feature Implementation
+
+### What was done:
+Implemented the foundational bootstrap import feature which reads existing poly_data CSV files and converts them to a professional DuckDB-over-Parquet analytics stack.
+
+### Features implemented:
+1. **Bootstrap CSV to Parquet pipeline** (`src/polymkt/pipeline/bootstrap.py`)
+   - Reads markets.csv, trades.csv, orderFilled.csv from data/ directory
+   - Converts to Parquet with ZSTD compression
+   - Proper schema with typed columns (timestamps as UTC datetime, numerics as float64)
+   - Column renaming from camelCase to snake_case
+
+2. **DuckDB view layer** (`src/polymkt/storage/duckdb_layer.py`)
+   - Creates v_markets, v_trades, v_order_filled, v_trades_with_markets views
+   - v_trades_with_markets includes days_to_exp derived field
+   - Query interface with market_id and time range filters
+
+3. **Metadata store** (`src/polymkt/storage/metadata.py`)
+   - SQLite-backed run history tracking
+   - Stores run_id, start/end time, rows read/written, schema version
+   - Watermark persistence for incremental updates
+
+4. **FastAPI endpoints** (`src/polymkt/api/main.py`)
+   - POST /api/bootstrap - Run bootstrap import
+   - GET /api/runs - List pipeline runs
+   - GET /api/runs/{run_id} - Get run details
+   - POST /api/query/trades - Query trades with filters
+   - GET /api/watermarks - Get current watermarks
+   - GET /health - Health check
+
+### PRD features marked as passing:
+- Bootstrap from existing backfilled poly_data CSVs
+- Convert backfilled trades.csv into compressed Parquet
+- Create DuckDB database layer with views over Parquet
+- Maintain metadata store for run history and watermarks
+
+### Tech stack:
+- Python 3.11+
+- FastAPI for API
+- DuckDB for analytics queries
+- PyArrow for Parquet operations
+- Pydantic for data validation
+- SQLite for metadata storage
+
+### Tests:
+12 tests passing covering bootstrap, API, and query functionality.
+Type checking passes with mypy.
+
+### Next steps for future sessions:
+- Implement schema validation for custom columns (category, closedTime, tags)
+- Implement incremental updates with watermark-based fetching
+- Add Parquet partitioning for query optimization
+- Implement the search indices (BM25 + vector search)

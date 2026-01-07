@@ -1,0 +1,13 @@
+{
+  "name": "polymkt",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "typecheck": "mypy src tests",
+    "test": "pytest",
+    "lint": "ruff check src tests",
+    "format": "ruff format src tests",
+    "dev": "uvicorn src.polymkt.api.main:app --reload"
+  },
+  "devDependencies": {}
+}

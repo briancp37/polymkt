@@ -1,0 +1,55 @@
+[project]
+name = "polymkt"
+version = "0.1.0"
+description = "Prediction market analytics platform with DuckDB-over-Parquet storage"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
+    "duckdb>=1.0.0",
+    "pyarrow>=15.0.0",
+    "pandas>=2.2.0",
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.1.0",
+    "structlog>=24.1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.27.0",
+    "mypy>=1.8.0",
+    "ruff>=0.2.0",
+    "pandas-stubs>=2.1.4",
+    "types-requests>=2.31.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["pyarrow", "pyarrow.*", "duckdb", "duckdb.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["polymkt.storage.parquet", "polymkt.pipeline.bootstrap"]
+disallow_untyped_calls = false
+disallow_any_expr = false
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

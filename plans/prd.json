@@ -1,0 +1,502 @@
+[
+    {
+      "category": "functional",
+      "description": "Bootstrap from existing backfilled poly_data CSVs (markets.csv, orderFilled.csv, trades.csv) without re-backfilling via update_all.py",
+      "steps": [
+        "Place existing files at data/markets.csv, data/orderFilled.csv, data/trades.csv",
+        "Run bootstrap import (CLI or API) that reads these CSVs as the source of truth for historical backfill",
+        "Verify import completes without calling any remote backfill endpoints",
+        "Verify row counts are non-zero for all three entities",
+        "Verify a run summary is produced (rows read, rows written, duration, schema versions)"
+      ],
+      "passes": true
+    },
+    {
+        "category": "functional",
+        "description": "Schema validation includes your custom markets columns (category, closedTime) and preserves them on updates; also includes tags in markets metadata derived from events",
+        "steps": [
+          "Load data/markets.csv with category and closedTime present",
+          "Run an events bootstrap that loads event_id and tags (list of strings) into an events table",
+          "Join events.tags onto markets via market.event_id (or the correct linking key) to produce markets.tags",
+          "Run bootstrap import into the storage layer",
+          "Run an incremental update that touches at least one existing market row and its associated event",
+          "Verify updated market rows still contain category, closedTime, and derived tags populated",
+          "Verify schema validation fails fast with actionable errors if required fields are missing or join keys are absent"
+        ],
+        "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Convert backfilled trades.csv into compressed Parquet optimized for analytics",
+      "steps": [
+        "Run bootstrap import for trades.csv",
+        "Write output as Parquet with compression enabled (e.g., ZSTD/Snappy)",
+        "Verify Parquet schema matches required trade columns (timestamp, market_id, maker, taker, nonusdc_side, maker_direction, taker_direction, price, usd_amount, token_amount, transactionHash)",
+        "Verify numeric fields are typed correctly (price/usd_amount/token_amount as numeric)",
+        "Verify timestamp is stored as UTC datetime"
+      ],
+      "passes": true
+    },
+    {
+      "category": "functional",
+      "description": "Partition Parquet to speed up common filters (time + market_id) using a professional DuckDB-over-Parquet setup",
+      "steps": [
+        "Configure partitioning strategy (e.g., year/month/day + market_id hash bucket)",
+        "Run Parquet write with partitioning enabled",
+        "Run a DuckDB query filtering one market_id and a narrow time range",
+        "Verify partition pruning reduces scanned files (inspect query plan / logs)",
+        "Verify query returns correct rows and completes within target latency"
+      ],
+      "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Maintain an immutable raw layer and a curated analytics layer for trades",
+      "steps": [
+        "Ingest/convert CSV into a raw Parquet layer (no derived fields except type normalization)",
+        "Run a curate step that builds an analytics Parquet layer",
+        "Verify raw layer is unchanged after curate step",
+        "Verify analytics layer contains derived fields needed for research/backtests (e.g., days_to_exp)",
+        "Verify both layers can be queried independently"
+      ],
+      "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Normalize and type-cast fields consistently (timestamps, numerics, addresses, directions)",
+      "steps": [
+        "Run bootstrap import on a sample with known edge cases (bad timestamps, missing price/usd_amount)",
+        "Verify timestamp is stored in a consistent timezone (UTC) and type (datetime)",
+        "Verify price/usd_amount/token_amount are numeric with expected precision",
+        "Verify maker/taker fields are normalized (lowercase/0x formatting) if configured",
+        "Verify invalid rows are either quarantined or rejected with clear error logs"
+      ],
+      "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Create a DuckDB database layer that exposes views over Parquet for consistent querying",
+      "steps": [
+        "Initialize local duckdb file (or in-memory) with configured Parquet paths",
+        "Create DuckDB views (v_trades, v_markets, v_order_filled) over the Parquet datasets",
+        "Verify queries work via the views without needing direct file paths",
+        "Verify views include joins needed for backtests (trades joined to markets on market_id)",
+        "Verify the view definitions are version-controlled and reproducible"
+      ],
+      "passes": true
+    },
+    {
+        "category": "functional",
+        "description": "Incremental updates use poly_data-like logic (fast forward from last watermark) instead of full backfill, including event tags refresh",
+        "steps": [
+          "Read current watermark (max timestamp / last block / last cursor) from local state",
+          "Run update to fetch only new markets/orderFilled/trades since watermark",
+          "Run an events update script (modeled after poly_data update_markets) to fetch updated/new events and their tags",
+          "Upsert events into storage and re-derive markets.tags by joining markets to events",
+          "Append new rows to Parquet and update DuckDB views if needed",
+          "Verify watermark advances and is persisted",
+          "Verify runtime is proportional to new data (not total history)"
+        ],
+        "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Idempotent update runs (re-running the same update does not duplicate trades)",
+      "steps": [
+        "Run incremental update once",
+        "Run incremental update again without new upstream data",
+        "Verify trade counts and unique transactionHash counts do not change",
+        "Verify dedupe key logic is enforced (transactionHash or composite)",
+        "Verify logs explicitly report dedupe/skips"
+      ],
+      "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Maintain a metadata store for run history and watermarks (professional ops feel without heavy infra)",
+      "steps": [
+        "Run bootstrap import",
+        "Verify a run record is written (run_id, start/end time, rows read/written, schema version, watermark before/after)",
+        "Run incremental update",
+        "Verify another run record is written and linked to artifacts (partitions touched)",
+        "Verify run history can be viewed via API"
+      ],
+      "passes": true
+    },
+    {
+      "category": "functional",
+      "description": "Query interface: filter by a single market_id and time range",
+      "steps": [
+        "Call the query endpoint (or CLI) with market_id and start/end timestamps",
+        "Verify returned rows only include that market_id",
+        "Verify returned rows are within the requested time range",
+        "Verify results are sorted or include a stable ordering option",
+        "Verify response supports pagination or row limits"
+      ],
+      "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Query interface: filter by many market_ids (100+), efficiently",
+      "steps": [
+        "Call the query endpoint with a list of 100+ market_ids and a time range",
+        "Verify query completes within an acceptable latency budget for research",
+        "Verify results include only requested market_ids",
+        "Verify backend uses predicate pushdown / partition pruning where applicable",
+        "Verify response size controls are enforced (limit/streaming/export)"
+      ],
+      "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Add derived field days_to_exp using markets.closedTime as expiry",
+      "steps": [
+        "Join trades to markets by market_id",
+        "Compute days_to_exp = (closedTime - trade_timestamp) in days (document rounding rule)",
+        "Verify days_to_exp is correct for known sample timestamps",
+        "Verify days_to_exp is persisted in the analytics layer or computed in a view",
+        "Verify days_to_exp can be filtered efficiently (e.g., between 89 and 91)"
+      ],
+      "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Support an 'election group' concept so 'buy the favorite' can be computed across a set of related markets",
+      "steps": [
+        "Provide a mapping input that groups market_ids into election_group_id (CSV/JSON or derived from markets fields)",
+        "Load the mapping into DuckDB (or a small SQLite table) and join to markets",
+        "Verify each group has 2+ candidate markets where 'favorite' makes sense",
+        "Verify missing mappings are reported clearly (unmapped market_ids list)",
+        "Verify grouping can be edited without re-importing all trades"
+      ],
+      "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Define 'favorite' as highest YES price at the 90-days-to-exp snapshot per election group",
+      "steps": [
+        "For each market_id, compute snapshot price at (days_to_exp ~= 90) using a documented method (e.g., last trade price before snapshot time)",
+        "For each election_group_id, select the market_id with max YES price at that snapshot",
+        "Verify the favorite selection is deterministic for a fixed dataset",
+        "Verify ties are handled (deterministic tie-break rule)",
+        "Verify favorites are persisted as a signal table for backtests"
+      ],
+      "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Backtest v1: buy the favorite (highest YES price) at 90 days to expiry and hold to expiry",
+      "steps": [
+        "Select a dataset/universe containing 100+ markets with valid election_group_id and closedTime",
+        "Generate favorite signals at the 90-day snapshot per group (highest YES price)",
+        "Simulate entry (one position per group) and hold until closedTime",
+        "Compute per-trade and aggregate PnL and summary metrics",
+        "Verify results are reproducible with a saved configuration"
+      ],
+      "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Backtest assumptions include fees and simple slippage controls (even if default is 0)",
+      "steps": [
+        "Run backtest with fee=0 and slippage=0",
+        "Run backtest with non-zero fee and slippage parameters",
+        "Verify fills and PnL incorporate these costs",
+        "Verify parameters are stored with the backtest run",
+        "Verify UI displays the parameters used"
+      ],
+      "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Persist 'Datasets' (market sets + filters + market list) so users can reuse them in the UI",
+      "steps": [
+        "Create a dataset by filters (e.g., category/tags/query, date range, min volume) or by explicit market list",
+        "Save dataset to SQLite (id, name, description, filters, included market_ids)",
+        "List datasets and open one",
+        "Edit dataset (exclude/include some markets) and re-save",
+        "Verify future backtests use the updated included market list"
+      ],
+      "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Persist 'Backtests' so users can review prior results and rerun with modifications",
+      "steps": [
+        "Run a backtest on a dataset",
+        "Persist backtest record (id, dataset_id, strategy config, created_at, summary metrics)",
+        "List backtests and open a backtest detail view",
+        "Rerun backtest with a modified parameter (e.g., horizon)",
+        "Verify both runs remain available and comparable"
+      ],
+      "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Dataset Agent: accept natural-language filters and produce a saved dataset (with an editable market list)",
+      "steps": [
+        "Submit a natural-language request (e.g., 'find election markets about senate control')",
+        "Verify the agent returns a summary and a market list with inclusion flags",
+        "Modify the market list (exclude a few) and resubmit",
+        "Save the dataset and verify it appears in the dataset list",
+        "Verify saved filters and market counts match what the agent displayed"
+      ],
+      "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Backtesting Agent: accept natural-language strategy requests and run backtests on a selected dataset",
+      "steps": [
+        "Select a dataset_id (or provide a dataset name)",
+        "Submit a strategy request in natural language (e.g., 'buy favorite 90 days out, hold to expiry')",
+        "Verify the agent produces a confirmation summary of parsed rules",
+        "Run the backtest and verify results (equity curve + metrics + trades)",
+        "Modify a parameter (e.g., horizon to 60 days) and verify the agent re-runs correctly"
+      ],
+      "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Expose API endpoints for bootstrap import, incremental update, query, dataset CRUD, and backtest execution (FastAPI)",
+      "steps": [
+        "Start backend and open OpenAPI docs",
+        "Call /health",
+        "Call /api/bootstrap (imports existing CSVs into Parquet + metadata tables)",
+        "Call /api/update (fetches only new data using poly_data-like logic)",
+        "Call query/dataset/backtest endpoints and verify persistence and results"
+      ],
+      "passes": false
+    },
+    {
+        "category": "functional",
+        "description": "Integrate poly_data repo logic where possible (incremental fetch, processing, resumability) with custom Parquet output and event-derived tags support",
+        "steps": [
+          "Run the pipeline using poly_data-derived update/fetch components for markets/orderFilled/trades",
+          "Add an events fetch/update module modeled after poly_data/poly_utils/update_markets to retrieve event tags",
+          "Verify events tags are stored and joined onto markets deterministically",
+          "Verify markets updates preserve/refresh category and closedTime, and tags are refreshed via the events join",
+          "Verify final outputs are Parquet (not CSV) and partitioned per configuration",
+          "Verify the pipeline is resumable after an interrupted run"
+        ],
+        "passes": false
+    },
+    {
+        "category": "functional",
+        "description": "Create a searchable Markets index (BM25) over market.question and event-derived market.tags (list of strings) for keyword search",
+        "steps": [
+          "Load markets metadata into DuckDB as a markets table/view with question available",
+          "Ensure markets.tags is derived by joining markets to events.tags (and is present in the markets view)",
+          "Flatten tags list into a searchable text field (e.g., tags_text) while retaining the original list for UI",
+          "Enable DuckDB full-text search extension (fts) and build an index over question and tags_text (and optionally description)",
+          "Run a search query for a common keyword (e.g., 'election')",
+          "Verify results are returned with a relevance score and are sorted by relevance by default"
+        ],
+        "passes": false
+    },
+    {
+        "category": "functional",
+        "description": "Create a semantic search index (OpenAI embeddings) for markets using question + event-derived tags",
+        "steps": [
+          "Ensure markets.tags is derived by joining markets to events.tags and is available in the markets view",
+          "Generate OpenAI embeddings for each market using question + tags (and optionally description) and store embedding_model + embedding_dim",
+          "Store embeddings in a DuckDB table keyed by market_id",
+          "Enable DuckDB vector search extension (vss) and create an ANN index",
+          "Run a semantic query (e.g., 'voter turnout prediction')",
+          "Verify the system returns relevant markets even when exact keywords are absent"
+        ],
+        "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Hybrid market search: combine BM25 and embedding results and return a single ranked list",
+      "steps": [
+        "Submit a search query with mode=hybrid",
+        "Retrieve top-K from BM25 and top-K from vector search",
+        "Merge candidates and compute a final relevance score (weighted or reranked)",
+        "Return results sorted by final relevance score",
+        "Verify hybrid improves results on both keyword-heavy and semantic-heavy queries"
+      ],
+      "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Incremental updates: new/changed markets update the search indices without full rebuild",
+      "steps": [
+        "Run an incremental update that adds or modifies markets rows (including question/tags/category/closedTime)",
+        "Detect which market rows changed (by updatedAt/hash of question+tags+description)",
+        "Upsert those rows into the DuckDB markets table",
+        "Regenerate embeddings only for changed/new markets",
+        "Verify BM25 and vector indices reflect the changes"
+      ],
+      "passes": false
+    },
+    {
+      "category": "functional",
+      "description": "Markets Search API endpoint returns paginated ranked results with metadata needed for UI",
+      "steps": [
+        "Call GET /api/markets/search?q=election&mode=hybrid&limit=50&offset=0",
+        "Verify response includes market_id, question, tags, category, closedTime, relevance_score, and an optional snippet/highlight",
+        "Call the same endpoint with offset=50 to fetch more",
+        "Verify stable ordering across pages for the same query",
+        "Verify the endpoint supports filtering (category, closedTime range) in addition to text search"
+      ],
+      "passes": false
+    },  
+    {
+        "category": "functional",
+        "description": "Incremental updates: new/changed markets and events update the search indices without full rebuild",
+        "steps": [
+          "Run an incremental update that adds or modifies markets rows (including question/category/closedTime) and updates/new events tags",
+          "Detect which market rows changed (by updatedAt/hash of question+description) and which events changed (by updatedAt/hash of tags)",
+          "Upsert changed/new events, re-derive markets.tags via join, and identify affected markets for embedding refresh",
+          "Regenerate embeddings only for changed/new/affected markets",
+          "Verify BM25 and vector indices reflect the changes"
+        ],
+        "passes": false
+    },
+    {
+      "category": "UX",
+      "description": "React frontend shows Datasets list and Backtests list (professional research workflow)",
+      "steps": [
+        "Open the app and navigate to Datasets",
+        "Verify a list of saved datasets is displayed with key stats (market count, date range, category/tags)",
+        "Open a dataset detail page and verify markets list is viewable/editable",
+        "Navigate to Backtests and verify saved runs are listed",
+        "Open a backtest detail page and verify results are rendered"
+      ],
+      "passes": false
+    },
+    {
+      "category": "UX",
+      "description": "React UI includes a dedicated Market List section with search, relevance sorting, and selection checkboxes",
+      "steps": [
+        "Open the Dataset creation flow and navigate to the Market List section",
+        "Enter a search term (e.g., 'election') and run search",
+        "Verify results appear sorted by relevance score by default",
+        "Verify each market row has a checkbox (checked = included)",
+        "Verify the user can uncheck markets to exclude them"
+      ],
+      "passes": false
+    },
+    {
+      "category": "UX",
+      "description": "Market List supports 'Load more' pagination and preserves selections across pages",
+      "steps": [
+        "Search for a term that returns many markets",
+        "Select or unselect several markets on page 1",
+        "Click 'Load more' to fetch the next page",
+        "Select additional markets on the new page",
+        "Verify selections from earlier pages remain intact"
+      ],
+      "passes": false
+    },
+    {
+      "category": "UX",
+      "description": "Dataset creation requires user confirmation of the Market List before saving the dataset",
+      "steps": [
+        "Perform a market search and select a set of markets via checkboxes",
+        "Click 'Continue' or 'Save dataset'",
+        "Verify a confirmation summary shows count of included markets and the selection basis",
+        "Confirm to save",
+        "Verify dataset is saved with its market list exactly matching the UI selection"
+      ],
+      "passes": false
+    },
+    {
+      "category": "UX",
+      "description": "Each Dataset persists its market list (included/excluded) and can be edited later",
+      "steps": [
+        "Create and save a dataset with a selected market list",
+        "Open the dataset details page",
+        "Verify the dataset shows the market list with inclusion status",
+        "Toggle inclusion for a few markets and save changes",
+        "Verify subsequent backtests use the updated included market list"
+      ],
+      "passes": false
+    },
+    {
+      "category": "UX",
+      "description": "Strategy confirmation screen: display parsed strategy and parameters before execution",
+      "steps": [
+        "From a dataset, click 'Run Backtest'",
+        "Enter strategy 'Buy highest YES 90 days out, hold to expiry'",
+        "Verify UI shows a review panel summarizing the strategy (favorite rule=max YES price, horizon=90, exit=expiry, fees/slippage, sizing defaults)",
+        "Click 'Confirm' to run",
+        "Verify backtest does not start until confirmation is accepted"
+      ],
+      "passes": false
+    },
+    {
+      "category": "UX",
+      "description": "Backtest results visualization includes equity curve, summary metrics, and trades table",
+      "steps": [
+        "Open a completed backtest",
+        "Verify an equity curve (or cumulative PnL curve) is displayed",
+        "Verify key metrics cards are displayed (total return, win rate, drawdown, trade count)",
+        "Verify a trades table is displayed (group, market_id, entry time/price, exit time/price, pnl)",
+        "Verify users can download results as CSV/JSON"
+      ],
+      "passes": false
+    },
+    {
+      "category": "nonfunctional",
+      "description": "Cost efficiency: local dev is fully functional, and 'production' can be object storage without a database server",
+      "steps": [
+        "Run end-to-end locally using filesystem Parquet + DuckDB + SQLite",
+        "Verify no managed DB is required for core workflows",
+        "Optionally configure object storage (S3/MinIO) and re-run read-only queries",
+        "Verify storage footprint is materially reduced vs CSV due to Parquet compression",
+        "Document expected costs and size estimates"
+      ],
+      "passes": false
+    },
+    {
+      "category": "nonfunctional",
+      "description": "Performance: DuckDB-over-Parquet queries are fast for iterative research (single market and 100+ markets)",
+      "steps": [
+        "Benchmark query for a single market_id over a 30-day window",
+        "Benchmark query for 100+ market_ids over the same window",
+        "Verify partition pruning/predicate pushdown is effective (plan/log inspection)",
+        "Verify memory usage is bounded (streaming/limits/spill-to-disk if needed)",
+        "Record baseline numbers for regression tracking"
+      ],
+      "passes": false
+    },
+    {
+      "category": "nonfunctional",
+      "description": "Reliability: pipeline is resumable and produces clear, structured logs",
+      "steps": [
+        "Start an update run and interrupt it mid-way",
+        "Re-run update",
+        "Verify it resumes safely without duplicating data",
+        "Verify logs are structured (json) and include run_id and watermark",
+        "Verify failures provide actionable remediation steps"
+      ],
+      "passes": false
+    },
+    {
+      "category": "nonfunctional",
+      "description": "Data quality checks: enforce uniqueness, expected ranges, and referential integrity between trades and markets",
+      "steps": [
+        "Validate transactionHash uniqueness (or uniqueness per market_id + transactionHash)",
+        "Validate price is within expected bounds (0..1 if normalized) and flag outliers",
+        "Validate trades.market_id exists in markets table; report missing ids",
+        "Validate closedTime exists for markets used in expiry-based backtests",
+        "Produce a data quality report artifact after bootstrap and updates"
+      ],
+      "passes": false
+    },
+    {
+      "category": "nonfunctional",
+      "description": "Schema evolution: adding new columns later (e.g., tags or additional market metadata) should not break reads or backtests",
+      "steps": [
+        "Bootstrap baseline schema and validate queries/backtests work",
+        "Add new derived columns in the analytics layer",
+        "Verify older partitions remain readable",
+        "Verify query layer selects required columns safely",
+        "Verify backtest code handles missing optional columns gracefully"
+      ],
+      "passes": false
+    }
+]
+  
