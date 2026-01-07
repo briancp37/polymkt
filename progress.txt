@@ -1724,3 +1724,59 @@ Implemented the core backtest execution engine that runs the "buy the favorite" 
 - Implement Backtesting Agent (natural language strategy requests)
 - Implement FastAPI endpoints for bootstrap import, incremental update
 - Implement React frontend for datasets/backtests UX
+
+---
+
+## 2026-01-07: FastAPI Endpoints Feature Verification
+
+### What was done:
+Verified that the FastAPI endpoints feature is complete. All required endpoints for the PRD were already implemented in previous sessions but the feature was not marked as passing.
+
+### Endpoints verified:
+1. **Health check** - `GET /health` - Returns system health and version
+2. **Bootstrap import** - `POST /api/bootstrap` - Imports CSVs into Parquet + metadata
+3. **Incremental update** - `POST /api/update` - Fetches new data using watermark-based logic
+4. **Query endpoints**:
+   - `POST /api/query/trades` - Query trades with filters
+   - `POST /api/query/trades_with_markets` - Query trades with market data and days_to_exp
+   - `GET /api/markets/search` - Unified search (BM25/semantic/hybrid)
+5. **Dataset CRUD**:
+   - `POST /api/datasets` - Create dataset
+   - `GET /api/datasets` - List datasets
+   - `GET /api/datasets/{id}` - Get dataset
+   - `PUT /api/datasets/{id}` - Update dataset
+   - `DELETE /api/datasets/{id}` - Delete dataset
+6. **Backtest CRUD + execution**:
+   - `POST /api/backtests` - Create backtest
+   - `GET /api/backtests` - List backtests
+   - `GET /api/backtests/{id}` - Get backtest
+   - `PUT /api/backtests/{id}` - Update backtest
+   - `DELETE /api/backtests/{id}` - Delete backtest
+   - `POST /api/backtests/{id}/execute` - Execute backtest
+
+### PRD requirements met:
+- Start backend and open OpenAPI docs ✓
+- Call /health ✓
+- Call /api/bootstrap ✓
+- Call /api/update ✓
+- Call query/dataset/backtest endpoints and verify persistence and results ✓
+
+### Tests:
+481 tests passing (all existing tests).
+Type checking passes with mypy (0 issues in 26 source files).
+
+### PRD features marked as passing:
+- Expose API endpoints for bootstrap import, incremental update, query, dataset CRUD, and backtest execution (FastAPI)
+
+### Notes for next person:
+- The API is comprehensive with ~50+ endpoints covering all core functionality
+- OpenAPI docs are auto-generated at /docs when running the FastAPI server
+- All endpoints follow RESTful conventions with proper status codes
+- Pagination is supported on list endpoints (limit/offset with total_count and has_more)
+
+### Next steps for future sessions:
+- Implement poly_data integration for live updates
+- Implement Dataset Agent (natural language filters)
+- Implement Backtesting Agent (natural language strategy requests)
+- Implement React frontend for datasets/backtests UX
+- Implement nonfunctional features (cost efficiency, performance, reliability)

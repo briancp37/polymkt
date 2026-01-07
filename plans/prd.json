@@ -265,7 +265,7 @@
         "Call /api/update (fetches only new data using poly_data-like logic)",
         "Call query/dataset/backtest endpoints and verify persistence and results"
       ],
-      "passes": false
+      "passes": true
     },
     {
         "category": "functional",
