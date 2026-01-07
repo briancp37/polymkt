@@ -181,3 +181,32 @@ class EmbeddingStats(BaseModel):
     embedding_dim: int | None = Field(None, description="Dimension of embedding vectors")
     first_created: datetime | None = Field(None, description="First embedding creation time")
     last_created: datetime | None = Field(None, description="Last embedding creation time")
+
+
+class HybridSearchResult(BaseModel):
+    """A single hybrid search result combining BM25 and semantic scores."""
+
+    id: str = Field(..., description="Market ID")
+    question: str = Field(..., description="Market question")
+    tags: list[str] | None = Field(None, description="Market tags derived from event")
+    category: str | None = Field(None, description="Market category")
+    closed_time: datetime | None = Field(None, description="Market close time")
+    event_id: str | None = Field(None, description="Parent event ID")
+    score: float = Field(..., description="Combined RRF score (higher is better)")
+    bm25_score: float | None = Field(None, description="BM25 relevance score (if in BM25 results)")
+    semantic_score: float | None = Field(
+        None, description="Cosine similarity score (if in semantic results)"
+    )
+    bm25_rank: int | None = Field(None, description="Rank in BM25 results")
+    semantic_rank: int | None = Field(None, description="Rank in semantic results")
+
+
+class HybridIndexStats(BaseModel):
+    """Statistics about the hybrid search indices."""
+
+    bm25_available: bool = Field(..., description="Whether BM25 index is available")
+    semantic_available: bool = Field(..., description="Whether semantic index is available")
+    bm25_markets_indexed: int | None = Field(None, description="Markets in BM25 index")
+    semantic_markets_indexed: int | None = Field(None, description="Markets in semantic index")
+    semantic_embedding_model: str | None = Field(None, description="Embedding model used")
+    semantic_embedding_dim: int | None = Field(None, description="Embedding dimensions")

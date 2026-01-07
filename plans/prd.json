@@ -316,7 +316,7 @@
         "Return results sorted by final relevance score",
         "Verify hybrid improves results on both keyword-heavy and semantic-heavy queries"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "functional",

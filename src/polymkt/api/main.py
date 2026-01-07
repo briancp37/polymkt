@@ -10,6 +10,8 @@ from polymkt.models.schemas import (
     BootstrapSummary,
     CurateSummary,
     EmbeddingStats,
+    HybridIndexStats,
+    HybridSearchResult,
     MarketSearchResult,
     RunRecord,
     SemanticSearchResult,
@@ -21,6 +23,7 @@ from polymkt.pipeline.update import run_update
 from polymkt.storage.duckdb_layer import DuckDBLayer
 from polymkt.storage.metadata import MetadataStore
 from polymkt.storage.search import MarketSearchIndex
+from polymkt.storage.hybrid_search import HybridSearchIndex
 from polymkt.storage.semantic_search import SemanticSearchIndex
 
 app = FastAPI(
@@ -123,6 +126,25 @@ class BuildSemanticIndexResponse(BaseModel):
     markets_indexed: int
     embedding_model: str
     embedding_dimensions: int
+
+
+class HybridSearchResponse(BaseModel):
+    """Response for hybrid search."""
+
+    results: list[HybridSearchResult]
+    count: int
+    total_count: int
+    has_more: bool
+
+
+class BuildHybridIndexResponse(BaseModel):
+    """Response for building hybrid search index."""
+
+    status: str
+    bm25_markets_indexed: int
+    semantic_markets_indexed: int
+    embedding_model: str | None
+    embedding_dimensions: int | None
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -621,5 +643,189 @@ def get_embedding_stats() -> EmbeddingStats:
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get embedding stats: {e}")
+    finally:
+        duckdb_layer.close()
+
+
+@app.post("/api/hybrid-search/build", response_model=BuildHybridIndexResponse)
+def build_hybrid_index() -> BuildHybridIndexResponse:
+    """
+    Build or rebuild the hybrid search index (both BM25 and semantic).
+
+    This creates:
+    1. BM25 full-text search index over question, tags, and description
+    2. Semantic search index using OpenAI embeddings (if API key configured)
+
+    If OpenAI API key is not configured, only BM25 index is built.
+    """
+    if not (settings.parquet_dir / "markets.parquet").exists():
+        raise HTTPException(
+            status_code=400,
+            detail="Markets data not available. Run bootstrap first.",
+        )
+
+    duckdb_layer = DuckDBLayer(settings.duckdb_path, settings.parquet_dir)
+    try:
+        duckdb_layer.create_views()
+
+        hybrid_index = HybridSearchIndex(
+            conn=duckdb_layer.conn,
+            openai_api_key=settings.openai_api_key,
+            embedding_model=settings.openai_embedding_model,
+            embedding_dimensions=settings.openai_embedding_dimensions,
+        )
+
+        # Always build BM25
+        bm25_count = hybrid_index.build_bm25_index()
+
+        # Build semantic if API key available
+        semantic_count = 0
+        if settings.openai_api_key:
+            semantic_count = hybrid_index.build_semantic_index()
+
+        return BuildHybridIndexResponse(
+            status="success",
+            bm25_markets_indexed=bm25_count,
+            semantic_markets_indexed=semantic_count,
+            embedding_model=settings.openai_embedding_model if settings.openai_api_key else None,
+            embedding_dimensions=settings.openai_embedding_dimensions if settings.openai_api_key else None,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to build hybrid index: {e}")
+    finally:
+        duckdb_layer.close()
+
+
+@app.get("/api/markets/hybrid-search", response_model=HybridSearchResponse)
+def hybrid_search_markets(
+    q: str,
+    limit: int = 50,
+    offset: int = 0,
+    category: str | None = None,
+    closed_time_min: str | None = None,
+    closed_time_max: str | None = None,
+) -> HybridSearchResponse:
+    """
+    Search markets using hybrid BM25 + semantic search.
+
+    This endpoint combines results from BM25 full-text search and semantic
+    vector search using Reciprocal Rank Fusion (RRF). This provides better
+    results for both keyword-heavy and semantic-heavy queries.
+
+    The hybrid approach:
+    1. Retrieves top-K results from both BM25 and semantic search
+    2. Merges candidates using RRF scoring
+    3. Returns a single ranked list sorted by combined relevance
+
+    Note: If OpenAI API key is not configured, only BM25 results are returned.
+
+    Args:
+        q: Search query string (required)
+        limit: Maximum results to return (default 50)
+        offset: Number of results to skip for pagination (default 0)
+        category: Filter by market category (optional)
+        closed_time_min: Filter by minimum closed_time (optional)
+        closed_time_max: Filter by maximum closed_time (optional)
+
+    Returns:
+        Paginated search results with hybrid RRF scores
+    """
+    if not (settings.parquet_dir / "markets.parquet").exists():
+        raise HTTPException(
+            status_code=400,
+            detail="Markets data not available. Run bootstrap first.",
+        )
+
+    duckdb_layer = DuckDBLayer(settings.duckdb_path, settings.parquet_dir)
+    try:
+        duckdb_layer.create_views()
+
+        hybrid_index = HybridSearchIndex(
+            conn=duckdb_layer.conn,
+            openai_api_key=settings.openai_api_key,
+            embedding_model=settings.openai_embedding_model,
+            embedding_dimensions=settings.openai_embedding_dimensions,
+        )
+
+        results_raw, total_count = hybrid_index.search(
+            query=q,
+            limit=limit,
+            offset=offset,
+            category=category,
+            closed_time_min=closed_time_min,
+            closed_time_max=closed_time_max,
+        )
+
+        results = [
+            HybridSearchResult(
+                id=r["id"],
+                question=r["question"],
+                tags=r.get("tags"),
+                category=r.get("category"),
+                closed_time=r.get("closed_time"),
+                event_id=r.get("event_id"),
+                score=r["score"],
+                bm25_score=r.get("bm25_score"),
+                semantic_score=r.get("semantic_score"),
+                bm25_rank=r.get("bm25_rank"),
+                semantic_rank=r.get("semantic_rank"),
+            )
+            for r in results_raw
+        ]
+
+        has_more = (offset + len(results)) < total_count
+        return HybridSearchResponse(
+            results=results,
+            count=len(results),
+            total_count=total_count,
+            has_more=has_more,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Hybrid search failed: {e}")
+    finally:
+        duckdb_layer.close()
+
+
+@app.get("/api/hybrid-search/stats", response_model=HybridIndexStats)
+def get_hybrid_search_stats() -> HybridIndexStats:
+    """
+    Get statistics about the hybrid search indices.
+
+    Returns information about the current state of both BM25 and semantic
+    search indices.
+    """
+    if not (settings.parquet_dir / "markets.parquet").exists():
+        raise HTTPException(
+            status_code=400,
+            detail="Markets data not available. Run bootstrap first.",
+        )
+
+    duckdb_layer = DuckDBLayer(settings.duckdb_path, settings.parquet_dir)
+    try:
+        duckdb_layer.create_views()
+
+        hybrid_index = HybridSearchIndex(
+            conn=duckdb_layer.conn,
+            openai_api_key=settings.openai_api_key,
+            embedding_model=settings.openai_embedding_model,
+            embedding_dimensions=settings.openai_embedding_dimensions,
+        )
+
+        stats = hybrid_index.get_index_stats()
+
+        return HybridIndexStats(
+            bm25_available=stats["bm25_available"],
+            semantic_available=stats["semantic_available"],
+            bm25_markets_indexed=stats.get("bm25_markets_indexed"),
+            semantic_markets_indexed=stats.get("semantic_markets_indexed"),
+            semantic_embedding_model=stats.get("semantic_embedding_model"),
+            semantic_embedding_dim=stats.get("semantic_embedding_dim"),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get hybrid search stats: {e}")
     finally:
         duckdb_layer.close()

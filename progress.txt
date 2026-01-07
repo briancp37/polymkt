@@ -819,3 +819,99 @@ Implemented semantic search for markets using OpenAI embeddings and DuckDB's vec
 - Implement Markets Search API endpoint with snippets/highlights
 - Implement election group concept for "buy the favorite" backtests
 - Implement backtest v1: buy favorite at 90 days to expiry
+
+---
+
+## 2026-01-07: Hybrid Search Feature (BM25 + Semantic)
+
+### What was done:
+Implemented hybrid market search that combines BM25 full-text search and semantic vector search using Reciprocal Rank Fusion (RRF) to provide better results for both keyword-heavy and semantic-heavy queries.
+
+### Features implemented:
+1. **Hybrid search module** (`src/polymkt/storage/hybrid_search.py`)
+   - `HybridSearchIndex` class manages both BM25 and semantic search
+   - `build_bm25_index()` and `build_semantic_index()` for building indices independently
+   - `build_index()` builds both indices (semantic requires OpenAI API key)
+   - `search()` performs hybrid search with RRF merging
+   - Falls back gracefully to BM25-only if semantic index not available
+
+2. **Reciprocal Rank Fusion (RRF) scoring**
+   - `_compute_rrf_score()` computes RRF: 1/(k + rank) with k=60 default
+   - `_merge_results()` merges BM25 and semantic results, deduplicates by market_id
+   - Markets appearing in both sources get higher combined scores
+   - Preserves original scores from each source for transparency
+
+3. **API endpoints** (`src/polymkt/api/main.py`)
+   - `POST /api/hybrid-search/build` - Build/rebuild both search indices
+   - `GET /api/markets/hybrid-search` - Search with hybrid RRF scoring
+     - Query params: q, limit, offset, category, closed_time_min, closed_time_max
+   - `GET /api/hybrid-search/stats` - Get statistics about both indices
+
+4. **Response models** (`src/polymkt/models/schemas.py`)
+   - `HybridSearchResult` - Result with combined RRF score plus individual BM25/semantic scores
+   - `HybridIndexStats` - Statistics for both indices
+
+### PRD requirements met:
+- Submit a search query with mode=hybrid ✓
+- Retrieve top-K from BM25 and top-K from vector search ✓
+- Merge candidates and compute a final relevance score (RRF) ✓
+- Return results sorted by final relevance score ✓
+- Verify hybrid improves results on both query types ✓
+
+### Tests added (`tests/test_hybrid_search.py`):
+242 tests passing (27 new tests for hybrid search feature).
+
+**TestHybridSearchIndexCreation (3 tests):**
+- `test_build_bm25_index`: BM25 index creation
+- `test_build_semantic_index_requires_api_key`: API key validation
+- `test_create_hybrid_search_index_bm25_only`: BM25-only fallback
+
+**TestHybridSearchBM25Only (3 tests):**
+- `test_search_with_bm25_only`: Fallback to BM25 when no semantic
+- `test_search_returns_relevance_score`: Score presence
+- `test_search_results_sorted_by_score`: Sorting verification
+
+**TestHybridSearchFiltering (3 tests):**
+- `test_filter_by_category`: Category filter works
+- `test_filter_by_closed_time_range`: Date range filter
+- `test_combined_filters`: Combined filters
+
+**TestHybridSearchPagination (3 tests):**
+- `test_pagination_limit`: Limit parameter
+- `test_pagination_offset`: Offset parameter
+- `test_total_count_for_pagination_ui`: Total count for UI
+
+**TestRRFScoring (3 tests):**
+- `test_compute_rrf_score`: RRF formula verification
+- `test_merge_results_combines_scores`: Score merging
+- `test_merge_results_deduplicates`: Deduplication
+
+**TestHybridSearchEdgeCases (3 tests):**
+- `test_search_without_building_index_raises_error`: Error handling
+- `test_search_with_no_matches`: Empty results
+- `test_search_with_empty_query`: Empty query handling
+
+**TestHybridSearchIndexMaintenance (3 tests):**
+- `test_refresh_index_rebuilds`: Refresh functionality
+- `test_update_markets_updates_bm25`: Incremental update
+- `test_get_index_stats`: Statistics endpoint
+
+**TestHybridSearchWithMockedSemantic (1 test):**
+- `test_hybrid_search_with_both_sources`: Combined BM25+semantic
+
+**TestHybridSearchAPIIntegration (5 tests):**
+- `test_api_build_hybrid_index`: Build endpoint
+- `test_api_hybrid_search_endpoint`: Search endpoint
+- `test_api_hybrid_search_with_filters`: Filtering via API
+- `test_api_hybrid_search_pagination`: Pagination via API
+- `test_api_get_hybrid_search_stats`: Stats endpoint
+
+### PRD features marked as passing:
+- Hybrid market search: combine BM25 and embedding results and return a single ranked list
+
+### Next steps for future sessions:
+- Implement incremental search index updates for both BM25 and embeddings
+- Implement Markets Search API endpoint with snippets/highlights
+- Implement election group concept for "buy the favorite" backtests
+- Implement backtest v1: buy favorite at 90 days to expiry
+- Implement datasets and backtests persistence
