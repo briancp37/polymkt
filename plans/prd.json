@@ -193,7 +193,7 @@
         "Compute per-trade and aggregate PnL and summary metrics",
         "Verify results are reproducible with a saved configuration"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "functional",
@@ -205,7 +205,7 @@
         "Verify parameters are stored with the backtest run",
         "Verify UI displays the parameters used"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "functional",

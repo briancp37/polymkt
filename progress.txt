@@ -1623,3 +1623,104 @@ Implemented the "favorite" signal computation feature that identifies the market
 - Implement Dataset Agent (natural language filters)
 - Implement Backtesting Agent (natural language strategy requests)
 - Implement FastAPI endpoints for the remaining features
+
+---
+
+## 2026-01-07: Backtest V1 Feature - Buy the Favorite at 90 Days to Expiry
+
+### What was done:
+Implemented the core backtest execution engine that runs the "buy the favorite" strategy - buying the highest YES price market at 90 days to expiry and holding until market expiration.
+
+### Features implemented:
+1. **Backtest engine module** (`src/polymkt/backtest/engine.py`)
+   - `BacktestEngine` class orchestrates strategy execution
+   - `_find_entry_trade()` - Finds trades at the target days-to-exp (90 days) using DuckDB queries
+   - `_find_exit_at_expiry()` - Finds exit at market close, resolving prices to 0 or 1 based on outcome
+   - `_compute_metrics()` - Calculates aggregate metrics (total PnL, win rate, Sharpe ratio, max drawdown, etc.)
+   - `execute()` - Full execution flow: load dataset, load signals, simulate trades, persist results
+
+2. **PnL calculation with fees and slippage**
+   - Fee rate applied as percentage of position size (entry + exit)
+   - Slippage rate applied as price impact
+   - Net PnL = gross PnL - fees - slippage
+   - All costs stored in BacktestTradeRecord for transparency
+
+3. **Aggregate metrics computation**
+   - `total_return` - Percentage return on capital deployed
+   - `total_pnl` - Absolute profit/loss in USD
+   - `win_rate` - Fraction of winning trades
+   - `trade_count`, `winning_trades`, `losing_trades`
+   - `max_drawdown` - Maximum peak-to-trough decline
+   - `sharpe_ratio` - Risk-adjusted return (annualized)
+   - `avg_trade_pnl`, `avg_holding_period_days`
+
+4. **Equity curve generation**
+   - Tracks cumulative PnL after each trade
+   - Stores time, PnL, and trade index for visualization
+
+5. **API endpoint** (`src/polymkt/api/main.py:1395-1467`)
+   - `POST /api/backtests/{backtest_id}/execute` - Execute a pending backtest
+   - Creates DuckDB layer and all required stores
+   - Returns completed backtest with metrics, trades, and equity curve
+   - Proper error handling for missing signals, datasets, etc.
+
+6. **Price resolution logic**
+   - Exit price resolved to 1.0 if final trade price > 0.5 (YES outcome)
+   - Exit price resolved to 0.0 if final trade price <= 0.5 (NO outcome)
+   - Matches how prediction markets settle at expiry
+
+### PRD requirements met:
+- Select a dataset/universe containing 100+ markets with valid election_group_id and closedTime ✓
+- Generate favorite signals at the 90-day snapshot per group (highest YES price) ✓ (from previous feature)
+- Simulate entry (one position per group) and hold until closedTime ✓
+- Compute per-trade and aggregate PnL and summary metrics ✓
+- Verify results are reproducible with a saved configuration ✓
+
+- Run backtest with fee=0 and slippage=0 ✓
+- Run backtest with non-zero fee and slippage parameters ✓
+- Verify fills and PnL incorporate these costs ✓
+- Verify parameters are stored with the backtest run ✓
+
+### Tests added (`tests/test_backtest_engine.py`):
+481 tests total (18 new tests for backtest engine).
+
+**TestFindEntryTrade (2 tests):**
+- `test_find_entry_trade_at_snapshot`: Finds entry at 90 days to exp
+- `test_find_entry_trade_returns_none_for_no_trades`: Handles missing trades
+
+**TestFindExitTrade (2 tests):**
+- `test_find_exit_at_expiry`: Resolves winning trades to 1.0
+- `test_find_exit_resolves_to_zero_for_losers`: Resolves losing trades to 0.0
+
+**TestComputeMetrics (5 tests):**
+- `test_compute_metrics_with_winning_trades`: Win rate 100%
+- `test_compute_metrics_with_losing_trades`: Win rate 0%
+- `test_compute_metrics_with_mixed_trades`: Mixed win/loss calculation
+- `test_compute_metrics_empty_trades`: Empty trade list
+- `test_compute_metrics_includes_fees_and_slippage`: Cost incorporation
+
+**TestBacktestExecution (5 tests):**
+- `test_execute_backtest_success`: Full successful execution
+- `test_execute_backtest_with_fees_and_slippage`: Fees/slippage applied
+- `test_execute_backtest_updates_status`: Status transitions
+- `test_execute_backtest_fails_for_non_pending`: Status validation
+- `test_execute_backtest_fails_without_signals`: Signal requirement
+
+**TestBacktestReproducibility (1 test):**
+- `test_backtest_produces_reproducible_results`: Same config = same results
+
+**TestBacktestExecuteAPI (3 tests):**
+- `test_execute_backtest_endpoint`: API execution works
+- `test_execute_backtest_not_found`: 404 handling
+- `test_execute_backtest_without_signals`: Missing signals error
+
+### PRD features marked as passing:
+- Backtest v1: buy the favorite (highest YES price) at 90 days to expiry and hold to expiry
+- Backtest assumptions include fees and simple slippage controls (even if default is 0)
+
+### Next steps for future sessions:
+- Implement poly_data integration for live updates
+- Implement Dataset Agent (natural language filters)
+- Implement Backtesting Agent (natural language strategy requests)
+- Implement FastAPI endpoints for bootstrap import, incremental update
+- Implement React frontend for datasets/backtests UX

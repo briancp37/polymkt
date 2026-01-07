@@ -59,6 +59,7 @@ from polymkt.signals.favorites import (
     FavoriteSignalStore,
     compute_favorites_for_groups,
 )
+from polymkt.backtest.engine import BacktestEngine
 
 app = FastAPI(
     title="Polymkt Analytics API",
@@ -1389,6 +1390,80 @@ def delete_backtest(backtest_id: str) -> dict[str, str]:
         raise HTTPException(status_code=404, detail=f"Backtest not found: {backtest_id}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete backtest: {e}")
+
+
+@app.post("/api/backtests/{backtest_id}/execute", response_model=BacktestSchema)
+def execute_backtest(backtest_id: str) -> BacktestSchema:
+    """
+    Execute a pending backtest.
+
+    Runs the "buy the favorite" strategy on the backtest's dataset:
+    1. Loads the dataset markets
+    2. Loads pre-computed favorite signals at the entry days-to-exp (default 90)
+    3. For each election group with a favorite in the dataset:
+       - Enters at the snapshot price
+       - Exits at market expiry (resolved price 0 or 1)
+       - Calculates PnL with fees and slippage
+    4. Computes aggregate metrics
+    5. Updates the backtest with results
+
+    Prerequisites:
+    - Backtest must be in 'pending' status
+    - Dataset must exist with markets
+    - Election groups must be defined for the markets
+    - Favorite signals must be computed (POST /api/favorite-signals/compute)
+
+    Args:
+        backtest_id: The backtest UUID to execute
+
+    Returns:
+        The completed backtest with metrics, trades, and equity curve
+    """
+    duckdb_layer: DuckDBLayer | None = None
+    try:
+        # Create all required stores
+        duckdb_layer = DuckDBLayer(
+            settings.duckdb_path,
+            settings.parquet_dir,
+            partitioned=settings.parquet_partitioning_enabled,
+        )
+        duckdb_layer.create_views()
+
+        dataset_store = DatasetStore(settings.metadata_db_path)
+        backtest_store = BacktestStore(settings.metadata_db_path)
+        election_group_store = ElectionGroupStore(settings.metadata_db_path)
+        favorite_signal_store = FavoriteSignalStore(settings.metadata_db_path)
+
+        # Create engine and execute
+        engine = BacktestEngine(
+            duckdb_layer=duckdb_layer,
+            dataset_store=dataset_store,
+            backtest_store=backtest_store,
+            election_group_store=election_group_store,
+            favorite_signal_store=favorite_signal_store,
+        )
+
+        result = engine.execute(backtest_id)
+
+        if result.status == "failed":
+            raise HTTPException(
+                status_code=500, detail=f"Backtest execution failed: {result.error_message}"
+            )
+
+        # Return the updated backtest
+        return backtest_store.get_backtest(backtest_id)
+
+    except BacktestNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Backtest not found: {backtest_id}")
+    except DatasetNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to execute backtest: {e}")
+    finally:
+        if duckdb_layer:
+            duckdb_layer.close()
 
 
 # =============================================================================
