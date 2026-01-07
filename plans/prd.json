@@ -217,7 +217,7 @@
         "Edit dataset (exclude/include some markets) and re-save",
         "Verify future backtests use the updated included market list"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "functional",

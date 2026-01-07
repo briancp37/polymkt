@@ -9,6 +9,11 @@ from polymkt.config import settings
 from polymkt.models.schemas import (
     BootstrapSummary,
     CurateSummary,
+    DatasetCreateRequest,
+    DatasetListResponse,
+    DatasetSchema,
+    DatasetSummary,
+    DatasetUpdateRequest,
     EmbeddingStats,
     HybridIndexStats,
     HybridSearchResult,
@@ -23,6 +28,7 @@ from polymkt.models.schemas import (
 from polymkt.pipeline.bootstrap import run_bootstrap
 from polymkt.pipeline.curate import run_curate
 from polymkt.pipeline.update import run_update
+from polymkt.storage.datasets import DatasetNotFoundError, DatasetStore
 from polymkt.storage.duckdb_layer import DuckDBLayer
 from polymkt.storage.metadata import MetadataStore
 from polymkt.storage.search import MarketSearchIndex
@@ -1085,3 +1091,138 @@ def get_search_index_updater_stats() -> SearchIndexUpdaterStats:
         raise HTTPException(status_code=500, detail=f"Failed to get search index stats: {e}")
     finally:
         duckdb_layer.close()
+
+
+# =============================================================================
+# Dataset CRUD endpoints for persisting market sets with filters and market lists
+# =============================================================================
+
+
+@app.post("/api/datasets", response_model=DatasetSchema, status_code=201)
+def create_dataset(request: DatasetCreateRequest) -> DatasetSchema:
+    """
+    Create a new dataset with a set of markets.
+
+    A dataset is a saved collection of market IDs that can be reused for
+    backtesting and analysis. Datasets can be created by:
+    1. Explicit market list (via search, filters, or manual selection)
+    2. Filters that define the selection criteria
+
+    The market_ids list contains the actual markets to include. The filters
+    field records how the dataset was created (for reference/reproduction).
+
+    Args:
+        request: Dataset creation request with name, description, market_ids,
+                and optional filters/excluded_market_ids
+
+    Returns:
+        The created dataset with generated ID and timestamps
+    """
+    try:
+        dataset_store = DatasetStore(settings.metadata_db_path)
+        return dataset_store.create_dataset(request)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create dataset: {e}")
+
+
+@app.get("/api/datasets", response_model=DatasetListResponse)
+def list_datasets(limit: int = 50, offset: int = 0) -> DatasetListResponse:
+    """
+    List all datasets with pagination.
+
+    Returns dataset summaries (id, name, description, market_count, timestamps)
+    ordered by most recently updated first.
+
+    Args:
+        limit: Maximum number of datasets to return (default 50)
+        offset: Number of datasets to skip for pagination (default 0)
+
+    Returns:
+        Paginated list of dataset summaries with total_count and has_more
+    """
+    try:
+        dataset_store = DatasetStore(settings.metadata_db_path)
+        summaries, total_count = dataset_store.list_datasets(limit=limit, offset=offset)
+        has_more = (offset + len(summaries)) < total_count
+        return DatasetListResponse(
+            datasets=summaries,
+            count=len(summaries),
+            total_count=total_count,
+            has_more=has_more,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list datasets: {e}")
+
+
+@app.get("/api/datasets/{dataset_id}", response_model=DatasetSchema)
+def get_dataset(dataset_id: str) -> DatasetSchema:
+    """
+    Get a dataset by ID.
+
+    Returns the full dataset including all market_ids and filters.
+
+    Args:
+        dataset_id: The dataset UUID
+
+    Returns:
+        The dataset with all fields
+    """
+    try:
+        dataset_store = DatasetStore(settings.metadata_db_path)
+        return dataset_store.get_dataset(dataset_id)
+    except DatasetNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Dataset not found: {dataset_id}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get dataset: {e}")
+
+
+@app.put("/api/datasets/{dataset_id}", response_model=DatasetSchema)
+def update_dataset(dataset_id: str, request: DatasetUpdateRequest) -> DatasetSchema:
+    """
+    Update an existing dataset.
+
+    Only provided fields are updated; omitted fields retain their existing values.
+    Use this endpoint to:
+    - Rename a dataset
+    - Update the description
+    - Modify the market list (add/remove markets)
+    - Update excluded_market_ids
+
+    Args:
+        dataset_id: The dataset UUID
+        request: Fields to update (only provided fields are modified)
+
+    Returns:
+        The updated dataset
+    """
+    try:
+        dataset_store = DatasetStore(settings.metadata_db_path)
+        return dataset_store.update_dataset(dataset_id, request)
+    except DatasetNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Dataset not found: {dataset_id}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update dataset: {e}")
+
+
+@app.delete("/api/datasets/{dataset_id}")
+def delete_dataset(dataset_id: str) -> dict[str, str]:
+    """
+    Delete a dataset.
+
+    This permanently removes the dataset. Any backtests that reference this
+    dataset will retain their own copies of the market list.
+
+    Args:
+        dataset_id: The dataset UUID
+
+    Returns:
+        Confirmation message
+    """
+    try:
+        dataset_store = DatasetStore(settings.metadata_db_path)
+        dataset_store.delete_dataset(dataset_id)
+        return {"status": "deleted", "dataset_id": dataset_id}
+    except DatasetNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Dataset not found: {dataset_id}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete dataset: {e}")

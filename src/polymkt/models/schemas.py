@@ -261,3 +261,80 @@ class SearchIndexUpdaterStats(BaseModel):
     semantic_markets_indexed: int | None = Field(None, description="Markets in semantic index")
     semantic_embedding_model: str | None = Field(None, description="Embedding model used")
     semantic_embedding_dim: int | None = Field(None, description="Embedding dimensions")
+
+
+# =============================================================================
+# Dataset schemas for persisting market sets with filters and market lists
+# =============================================================================
+
+
+class DatasetFilters(BaseModel):
+    """Filters used to create a dataset."""
+
+    query: str | None = Field(None, description="Search query used to find markets")
+    category: str | None = Field(None, description="Category filter")
+    tags: list[str] | None = Field(None, description="Tag filters")
+    closed_time_min: datetime | None = Field(None, description="Minimum closed time")
+    closed_time_max: datetime | None = Field(None, description="Maximum closed time")
+    min_volume: float | None = Field(None, description="Minimum trading volume")
+
+
+class DatasetSchema(BaseModel):
+    """Schema for a saved dataset (market set with filters and market list)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(..., description="Dataset ID (UUID)")
+    name: str = Field(..., description="User-friendly dataset name")
+    description: str | None = Field(None, description="Dataset description")
+    filters: DatasetFilters | None = Field(None, description="Filters used to create dataset")
+    market_ids: list[str] = Field(default_factory=list, description="Included market IDs")
+    excluded_market_ids: list[str] = Field(
+        default_factory=list, description="Explicitly excluded market IDs"
+    )
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+
+
+class DatasetCreateRequest(BaseModel):
+    """Request to create a new dataset."""
+
+    name: str = Field(..., min_length=1, max_length=255, description="Dataset name")
+    description: str | None = Field(None, max_length=2000, description="Dataset description")
+    filters: DatasetFilters | None = Field(None, description="Filters used to create dataset")
+    market_ids: list[str] = Field(..., min_length=1, description="Market IDs to include")
+    excluded_market_ids: list[str] = Field(
+        default_factory=list, description="Market IDs to explicitly exclude"
+    )
+
+
+class DatasetUpdateRequest(BaseModel):
+    """Request to update an existing dataset."""
+
+    name: str | None = Field(None, min_length=1, max_length=255, description="Dataset name")
+    description: str | None = Field(None, max_length=2000, description="Dataset description")
+    filters: DatasetFilters | None = Field(None, description="Filters used to create dataset")
+    market_ids: list[str] | None = Field(None, description="Market IDs to include")
+    excluded_market_ids: list[str] | None = Field(
+        None, description="Market IDs to explicitly exclude"
+    )
+
+
+class DatasetSummary(BaseModel):
+    """Summary of a dataset for list views."""
+
+    id: str = Field(..., description="Dataset ID")
+    name: str = Field(..., description="Dataset name")
+    description: str | None = Field(None, description="Dataset description")
+    market_count: int = Field(..., description="Number of included markets")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+
+
+class DatasetListResponse(BaseModel):
+    """Response for listing datasets."""
+
+    datasets: list[DatasetSummary] = Field(..., description="List of dataset summaries")
+    count: int = Field(..., description="Number of datasets in this response")
+    total_count: int = Field(..., description="Total number of datasets")
+    has_more: bool = Field(..., description="Whether more datasets exist")

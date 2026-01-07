@@ -1174,3 +1174,110 @@ Implemented event change detection in the incremental search index updater, enab
 - Implement datasets and backtests persistence
 - Implement poly_data integration for live updates
 - Implement API endpoints for dataset CRUD and backtest execution
+
+---
+
+## 2026-01-07: Datasets Persistence Feature
+
+### What was done:
+Implemented the Datasets persistence feature that allows users to save, list, update, and delete market sets with filters and market lists for reuse in backtesting and analysis.
+
+### Features implemented:
+1. **Dataset schema models** (`src/polymkt/models/schemas.py:271-340`)
+   - `DatasetFilters` - Filters used to create a dataset (query, category, tags, closed_time range, min_volume)
+   - `DatasetSchema` - Full dataset with id, name, description, filters, market_ids, excluded_market_ids, timestamps
+   - `DatasetCreateRequest` - Request to create a new dataset with validation
+   - `DatasetUpdateRequest` - Request for partial updates
+   - `DatasetSummary` - Summary for list views with market_count
+   - `DatasetListResponse` - Paginated list response with count, total_count, has_more
+
+2. **DatasetStore class** (`src/polymkt/storage/datasets.py`)
+   - SQLite-backed storage for datasets in the metadata database
+   - `create_dataset()` - Creates a new dataset with generated UUID and timestamps
+   - `get_dataset()` - Retrieves a dataset by ID, raises DatasetNotFoundError if not found
+   - `update_dataset()` - Partial update of dataset fields
+   - `delete_dataset()` - Removes a dataset
+   - `list_datasets()` - Paginated listing ordered by updated_at DESC
+   - Proper JSON serialization of filters (including datetime fields)
+   - Proper JSON serialization of market_ids and excluded_market_ids lists
+
+3. **API endpoints** (`src/polymkt/api/main.py:1096-1228`)
+   - `POST /api/datasets` - Create a new dataset (returns 201)
+   - `GET /api/datasets` - List datasets with pagination (limit, offset)
+   - `GET /api/datasets/{dataset_id}` - Get a dataset by ID
+   - `PUT /api/datasets/{dataset_id}` - Update a dataset (partial update supported)
+   - `DELETE /api/datasets/{dataset_id}` - Delete a dataset
+
+### PRD requirements met:
+- Create a dataset by filters or by explicit market list ✓
+- Save dataset to SQLite (id, name, description, filters, included market_ids) ✓
+- List datasets and open one ✓
+- Edit dataset (exclude/include some markets) and re-save ✓
+
+### Tests added (`tests/test_datasets.py`):
+348 tests total (40 new tests for datasets feature).
+
+**TestDatasetStoreCreation (2 tests):**
+- `test_init_creates_table`: Table creation verification
+- `test_init_creates_parent_dirs`: Directory creation
+
+**TestDatasetCreate (4 tests):**
+- `test_create_dataset_basic`: Basic dataset creation
+- `test_create_dataset_with_filters`: Filters with query, category, tags
+- `test_create_dataset_with_excluded_markets`: Excluded markets list
+- `test_create_multiple_datasets`: Multiple datasets
+
+**TestDatasetGet (3 tests):**
+- `test_get_dataset_by_id`: Get by ID
+- `test_get_nonexistent_dataset_raises`: 404 handling
+- `test_get_dataset_with_filters`: Filters with datetime fields
+
+**TestDatasetUpdate (6 tests):**
+- `test_update_dataset_name`: Update name only
+- `test_update_dataset_market_ids`: Update market list
+- `test_update_dataset_excluded_markets`: Update exclusions
+- `test_update_dataset_filters`: Update filters
+- `test_update_nonexistent_dataset_raises`: 404 handling
+- `test_update_preserves_created_at`: Timestamp preservation
+
+**TestDatasetDelete (3 tests):**
+- `test_delete_dataset`: Delete functionality
+- `test_delete_nonexistent_dataset_raises`: 404 handling
+- `test_delete_updates_count`: Count verification
+
+**TestDatasetList (5 tests):**
+- `test_list_empty`: Empty list
+- `test_list_returns_summaries`: Summary format
+- `test_list_pagination_limit`: Limit parameter
+- `test_list_pagination_offset`: Offset parameter
+- `test_list_ordered_by_updated_at`: Ordering
+
+**TestDatasetsAPICreate (5 tests):**
+- API endpoint tests for create with validation
+
+**TestDatasetsAPIList (3 tests):**
+- API endpoint tests for list with pagination
+
+**TestDatasetsAPIGet (2 tests):**
+- API endpoint tests for get by ID
+
+**TestDatasetsAPIUpdate (3 tests):**
+- API endpoint tests for update (full and partial)
+
+**TestDatasetsAPIDelete (2 tests):**
+- API endpoint tests for delete
+
+**TestDatasetsIntegration (2 tests):**
+- `test_full_crud_workflow`: Complete CRUD workflow test
+- `test_multiple_datasets_workflow`: Multiple datasets management
+
+### PRD features marked as passing:
+- Persist 'Datasets' (market sets + filters + market list) so users can reuse them in the UI
+
+### Next steps for future sessions:
+- Implement backtests persistence (save, list, rerun)
+- Implement election group concept for "buy the favorite" backtests
+- Implement backtest v1: buy favorite at 90 days to expiry
+- Implement poly_data integration for live updates
+- Implement Dataset Agent (natural language filters)
+- Implement Backtesting Agent (natural language strategy requests)
