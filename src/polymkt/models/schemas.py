@@ -613,3 +613,93 @@ class FavoriteSnapshotSummary(BaseModel):
     snapshot_days_to_exp: float = Field(..., description="Days to expiry of the snapshot")
     signal_count: int = Field(..., description="Number of signals at this snapshot")
     last_computed: datetime = Field(..., description="When signals were last computed")
+
+
+# =============================================================================
+# Data quality schemas for validation reports
+# =============================================================================
+
+
+class UniquenessIssueSchema(BaseModel):
+    """Details about a uniqueness violation."""
+
+    column: str = Field(..., description="Column with duplicate values")
+    duplicate_value: str = Field(..., description="Sample duplicate value")
+    occurrence_count: int = Field(..., description="Number of occurrences")
+
+
+class RangeIssueSchema(BaseModel):
+    """Details about a value out of expected range."""
+
+    column: str = Field(..., description="Column with out-of-range value")
+    value: float = Field(..., description="The out-of-range value")
+    expected_min: float | None = Field(None, description="Expected minimum")
+    expected_max: float | None = Field(None, description="Expected maximum")
+    row_identifier: str = Field(..., description="Identifier of the row (e.g., transaction_hash)")
+
+
+class ReferentialIntegrityIssueSchema(BaseModel):
+    """Details about a referential integrity violation."""
+
+    source_table: str = Field(..., description="Table containing the orphan reference")
+    source_column: str = Field(..., description="Column containing the orphan reference")
+    source_value: str = Field(..., description="The orphaned value")
+    target_table: str = Field(..., description="Table that should contain the referenced value")
+    target_column: str = Field(..., description="Column that should contain the referenced value")
+
+
+class DataQualityReportSchema(BaseModel):
+    """Complete data quality report."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    report_id: str = Field(..., description="Unique report identifier")
+    entity: str = Field(..., description="Entity checked (trades, markets, all)")
+    run_type: str = Field(..., description="Type of run (bootstrap, update)")
+    started_at: datetime = Field(..., description="When the check started")
+    completed_at: datetime = Field(..., description="When the check completed")
+
+    # Uniqueness
+    uniqueness_valid: bool = Field(..., description="Whether uniqueness checks passed")
+    uniqueness_issues: list[UniquenessIssueSchema] = Field(
+        default_factory=list, description="Sample uniqueness issues"
+    )
+    duplicate_count: int = Field(0, description="Total count of duplicate values")
+
+    # Range
+    range_valid: bool = Field(..., description="Whether range checks passed")
+    range_issues: list[RangeIssueSchema] = Field(
+        default_factory=list, description="Sample range issues"
+    )
+    out_of_range_count: int = Field(0, description="Total count of out-of-range values")
+
+    # Referential integrity
+    referential_integrity_valid: bool = Field(
+        ..., description="Whether referential integrity checks passed"
+    )
+    referential_integrity_issues: list[ReferentialIntegrityIssueSchema] = Field(
+        default_factory=list, description="Sample referential integrity issues"
+    )
+    orphaned_count: int = Field(0, description="Total count of orphaned references")
+
+    # Market-specific
+    markets_without_closed_time: int = Field(
+        0, description="Markets missing closedTime (warning for backtests)"
+    )
+
+    # Summary
+    total_issues: int = Field(..., description="Total number of issues found")
+    is_valid: bool = Field(..., description="Whether all checks passed")
+
+
+class DataQualityReportListResponse(BaseModel):
+    """Response for listing data quality reports."""
+
+    reports: list[DataQualityReportSchema] = Field(..., description="List of reports")
+    count: int = Field(..., description="Number of reports in this response")
+
+
+class DataQualityCheckRequest(BaseModel):
+    """Request to run a data quality check."""
+
+    run_type: str = Field("bootstrap", description="Type of run being checked")

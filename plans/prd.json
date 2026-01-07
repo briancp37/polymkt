@@ -484,7 +484,7 @@
         "Validate closedTime exists for markets used in expiry-based backtests",
         "Produce a data quality report artifact after bootstrap and updates"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "nonfunctional",

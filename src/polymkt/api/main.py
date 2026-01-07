@@ -14,6 +14,9 @@ from polymkt.models.schemas import (
     BacktestUpdateRequest,
     BootstrapSummary,
     CurateSummary,
+    DataQualityCheckRequest,
+    DataQualityReportListResponse,
+    DataQualityReportSchema,
     DatasetCreateRequest,
     DatasetListResponse,
     DatasetSchema,
@@ -35,11 +38,14 @@ from polymkt.models.schemas import (
     HybridIndexStats,
     HybridSearchResult,
     MarketSearchResult,
+    RangeIssueSchema,
+    ReferentialIntegrityIssueSchema,
     RunRecord,
     SearchIndexUpdateResult,
     SearchIndexUpdaterStats,
     SemanticSearchResult,
     UnifiedMarketSearchResult,
+    UniquenessIssueSchema,
     UnmappedMarketsResult,
     UpdateSummary,
 )
@@ -60,6 +66,7 @@ from polymkt.signals.favorites import (
     compute_favorites_for_groups,
 )
 from polymkt.backtest.engine import BacktestEngine
+from polymkt.storage.data_quality import DataQualityChecker
 
 app = FastAPI(
     title="Polymkt Analytics API",
@@ -2086,3 +2093,237 @@ def clear_favorite_signals(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to clear signals: {e}")
+
+
+# =============================================================================
+# Data Quality Check endpoints for validation and reporting
+# =============================================================================
+
+
+@app.post("/api/data-quality/check", response_model=DataQualityReportSchema)
+def run_data_quality_check(
+    request: DataQualityCheckRequest | None = None,
+) -> DataQualityReportSchema:
+    """
+    Run a comprehensive data quality check on the data layer.
+
+    This validates:
+    1. Uniqueness - transaction_hash uniqueness for trades
+    2. Range checks - price within 0-1, usd_amount non-negative
+    3. Referential integrity - trades.market_id exists in markets
+    4. Warnings - markets missing closedTime (needed for backtests)
+
+    A report is generated and persisted for later retrieval.
+
+    Args:
+        request: Optional request with run_type (default: "bootstrap")
+
+    Returns:
+        Complete data quality report with all findings
+    """
+    run_type = request.run_type if request else "bootstrap"
+
+    try:
+        checker = DataQualityChecker(
+            parquet_dir=settings.parquet_dir,
+            db_path=settings.metadata_db_path,
+            partitioned=settings.parquet_partitioning_enabled,
+        )
+        report = checker.run_full_check(run_type=run_type)
+
+        return DataQualityReportSchema(
+            report_id=report.report_id,
+            entity=report.entity,
+            run_type=report.run_type,
+            started_at=report.started_at,
+            completed_at=report.completed_at,
+            uniqueness_valid=report.uniqueness_valid,
+            uniqueness_issues=[
+                UniquenessIssueSchema(
+                    column=i.column,
+                    duplicate_value=i.duplicate_value,
+                    occurrence_count=i.occurrence_count,
+                )
+                for i in report.uniqueness_issues
+            ],
+            duplicate_count=report.duplicate_count,
+            range_valid=report.range_valid,
+            range_issues=[
+                RangeIssueSchema(
+                    column=i.column,
+                    value=i.value,
+                    expected_min=i.expected_min,
+                    expected_max=i.expected_max,
+                    row_identifier=i.row_identifier,
+                )
+                for i in report.range_issues
+            ],
+            out_of_range_count=report.out_of_range_count,
+            referential_integrity_valid=report.referential_integrity_valid,
+            referential_integrity_issues=[
+                ReferentialIntegrityIssueSchema(
+                    source_table=i.source_table,
+                    source_column=i.source_column,
+                    source_value=i.source_value,
+                    target_table=i.target_table,
+                    target_column=i.target_column,
+                )
+                for i in report.referential_integrity_issues
+            ],
+            orphaned_count=report.orphaned_count,
+            markets_without_closed_time=report.markets_without_closed_time,
+            total_issues=report.total_issues,
+            is_valid=report.is_valid,
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to run data quality check: {e}")
+
+
+@app.get("/api/data-quality/reports", response_model=DataQualityReportListResponse)
+def list_data_quality_reports(
+    limit: int = 50,
+) -> DataQualityReportListResponse:
+    """
+    List recent data quality reports.
+
+    Args:
+        limit: Maximum number of reports to return (default 50)
+
+    Returns:
+        List of data quality reports ordered by completion time (newest first)
+    """
+    try:
+        checker = DataQualityChecker(
+            parquet_dir=settings.parquet_dir,
+            db_path=settings.metadata_db_path,
+            partitioned=settings.parquet_partitioning_enabled,
+        )
+        reports = checker.list_reports(limit=limit)
+
+        return DataQualityReportListResponse(
+            reports=[
+                DataQualityReportSchema(
+                    report_id=r.report_id,
+                    entity=r.entity,
+                    run_type=r.run_type,
+                    started_at=r.started_at,
+                    completed_at=r.completed_at,
+                    uniqueness_valid=r.uniqueness_valid,
+                    uniqueness_issues=[
+                        UniquenessIssueSchema(
+                            column=i.column,
+                            duplicate_value=i.duplicate_value,
+                            occurrence_count=i.occurrence_count,
+                        )
+                        for i in r.uniqueness_issues
+                    ],
+                    duplicate_count=r.duplicate_count,
+                    range_valid=r.range_valid,
+                    range_issues=[
+                        RangeIssueSchema(
+                            column=i.column,
+                            value=i.value,
+                            expected_min=i.expected_min,
+                            expected_max=i.expected_max,
+                            row_identifier=i.row_identifier,
+                        )
+                        for i in r.range_issues
+                    ],
+                    out_of_range_count=r.out_of_range_count,
+                    referential_integrity_valid=r.referential_integrity_valid,
+                    referential_integrity_issues=[
+                        ReferentialIntegrityIssueSchema(
+                            source_table=i.source_table,
+                            source_column=i.source_column,
+                            source_value=i.source_value,
+                            target_table=i.target_table,
+                            target_column=i.target_column,
+                        )
+                        for i in r.referential_integrity_issues
+                    ],
+                    orphaned_count=r.orphaned_count,
+                    markets_without_closed_time=r.markets_without_closed_time,
+                    total_issues=r.total_issues,
+                    is_valid=r.is_valid,
+                )
+                for r in reports
+            ],
+            count=len(reports),
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list reports: {e}")
+
+
+@app.get("/api/data-quality/reports/{report_id}", response_model=DataQualityReportSchema)
+def get_data_quality_report(report_id: str) -> DataQualityReportSchema:
+    """
+    Get a specific data quality report by ID.
+
+    Args:
+        report_id: The report UUID
+
+    Returns:
+        The complete data quality report
+    """
+    try:
+        checker = DataQualityChecker(
+            parquet_dir=settings.parquet_dir,
+            db_path=settings.metadata_db_path,
+            partitioned=settings.parquet_partitioning_enabled,
+        )
+        report = checker.get_report(report_id)
+
+        if report is None:
+            raise HTTPException(status_code=404, detail=f"Report not found: {report_id}")
+
+        return DataQualityReportSchema(
+            report_id=report.report_id,
+            entity=report.entity,
+            run_type=report.run_type,
+            started_at=report.started_at,
+            completed_at=report.completed_at,
+            uniqueness_valid=report.uniqueness_valid,
+            uniqueness_issues=[
+                UniquenessIssueSchema(
+                    column=i.column,
+                    duplicate_value=i.duplicate_value,
+                    occurrence_count=i.occurrence_count,
+                )
+                for i in report.uniqueness_issues
+            ],
+            duplicate_count=report.duplicate_count,
+            range_valid=report.range_valid,
+            range_issues=[
+                RangeIssueSchema(
+                    column=i.column,
+                    value=i.value,
+                    expected_min=i.expected_min,
+                    expected_max=i.expected_max,
+                    row_identifier=i.row_identifier,
+                )
+                for i in report.range_issues
+            ],
+            out_of_range_count=report.out_of_range_count,
+            referential_integrity_valid=report.referential_integrity_valid,
+            referential_integrity_issues=[
+                ReferentialIntegrityIssueSchema(
+                    source_table=i.source_table,
+                    source_column=i.source_column,
+                    source_value=i.source_value,
+                    target_table=i.target_table,
+                    target_column=i.target_column,
+                )
+                for i in report.referential_integrity_issues
+            ],
+            orphaned_count=report.orphaned_count,
+            markets_without_closed_time=report.markets_without_closed_time,
+            total_issues=report.total_issues,
+            is_valid=report.is_valid,
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get report: {e}")

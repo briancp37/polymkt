@@ -1942,3 +1942,122 @@ Implemented the Reliability nonfunctional feature that ensures the pipeline is r
 - Watermark-based filtering is the primary mechanism for resumability
 - Deduplication by transaction_hash is the secondary safety net
 - All log output is valid JSON with timestamp, level, service, and run_id
+
+---
+
+## 2026-01-07: Data Quality Checks Feature
+
+### What was done:
+Implemented comprehensive data quality checks for validating trades, markets, and referential integrity. This nonfunctional feature provides production-grade data validation with persisted reports accessible via API.
+
+### Features implemented:
+1. **Data Quality Module** (`src/polymkt/storage/data_quality.py`)
+   - `DataQualityChecker` class - Main checker that runs all validation checks
+   - `check_uniqueness()` - Generic uniqueness check for any column
+   - `check_trade_uniqueness()` - Validates transaction_hash uniqueness in trades
+   - `check_price_range()` - Validates trade prices are within 0-1 bounds
+   - `check_usd_amount_range()` - Validates usd_amount is non-negative
+   - `check_trades_referential_integrity()` - Validates trades.market_id exists in markets
+   - `check_markets_closed_time()` - Counts markets missing closedTime (warning for backtests)
+   - `run_full_check()` - Runs all checks and produces a comprehensive report
+   - SQLite persistence for reports with get/list methods
+
+2. **Data Classes for Issues**
+   - `UniquenessIssue` - Details about duplicate values
+   - `RangeIssue` - Details about out-of-range values
+   - `ReferentialIntegrityIssue` - Details about orphaned references
+   - `DataQualityReport` - Complete report with all findings
+
+3. **API Schemas** (`src/polymkt/models/schemas.py`)
+   - `UniquenessIssueSchema` - Pydantic model for uniqueness issues
+   - `RangeIssueSchema` - Pydantic model for range issues
+   - `ReferentialIntegrityIssueSchema` - Pydantic model for referential integrity issues
+   - `DataQualityReportSchema` - Complete report schema
+   - `DataQualityReportListResponse` - List response schema
+   - `DataQualityCheckRequest` - Request schema with run_type
+
+4. **API Endpoints** (`src/polymkt/api/main.py`)
+   - `POST /api/data-quality/check` - Run a comprehensive data quality check
+   - `GET /api/data-quality/reports` - List recent data quality reports
+   - `GET /api/data-quality/reports/{report_id}` - Get a specific report by ID
+
+### Validation checks performed:
+1. **Uniqueness checks**
+   - transaction_hash uniqueness in trades
+   - Reports duplicate values with occurrence count
+
+2. **Range checks**
+   - price within 0.0-1.0 bounds
+   - usd_amount non-negative (>= 0)
+   - Reports out-of-range values with expected bounds
+
+3. **Referential integrity**
+   - trades.market_id must exist in markets.id
+   - Reports orphaned market_id values
+
+4. **Warning checks (informational)**
+   - Markets missing closed_time (needed for expiry-based backtests)
+
+### Tests added (`tests/test_data_quality.py`):
+25 tests total covering all aspects of the feature.
+
+**TestDataQualityCheckerCreation (2 tests):**
+- `test_init_creates_report_table`: Table creation
+- `test_init_creates_parent_dirs`: Directory creation
+
+**TestUniquenessCheck (2 tests):**
+- `test_uniqueness_valid_with_unique_hashes`: Valid unique hashes
+- `test_uniqueness_invalid_with_duplicates`: Duplicate detection
+
+**TestRangeCheck (3 tests):**
+- `test_price_valid_in_range`: Valid prices
+- `test_price_invalid_out_of_range`: Out-of-range price detection
+- `test_usd_amount_invalid_negative`: Negative amount detection
+
+**TestReferentialIntegrityCheck (2 tests):**
+- `test_referential_integrity_valid`: Valid references
+- `test_referential_integrity_invalid_orphaned_market_id`: Orphan detection
+
+**TestMarketsClosedTimeCheck (2 tests):**
+- `test_markets_with_closed_time`: Markets with closed_time
+- `test_markets_without_closed_time`: Missing closed_time counting
+
+**TestFullReport (4 tests):**
+- `test_run_full_check_all_valid`: Clean dataset produces valid report
+- `test_run_full_check_persists_report`: Report persistence
+- `test_list_reports_returns_recent`: Report listing
+- `test_report_with_multiple_issues`: Multiple issue types
+
+**TestDataQualityAPI (5 tests):**
+- `test_run_data_quality_check_endpoint`: POST check endpoint
+- `test_list_reports_endpoint`: GET reports list
+- `test_get_report_endpoint`: GET specific report
+- `test_get_report_not_found`: 404 handling
+- `test_check_endpoint_returns_issues_sample`: Issues in response
+
+**TestDataQualityReportPersistence (2 tests):**
+- `test_report_serialization_roundtrip`: Serialization/deserialization
+- `test_get_nonexistent_report`: Nonexistent report handling
+
+**TestDataQualityWithMissingData (3 tests):**
+- `test_no_trades_parquet`: Missing trades file
+- `test_no_markets_parquet`: Missing markets file
+- `test_empty_parquet_directory`: Empty directory
+
+### PRD requirements met:
+- Validate transactionHash uniqueness (or uniqueness per market_id + transactionHash) ✓
+- Validate price is within expected bounds (0..1 if normalized) and flag outliers ✓
+- Validate trades.market_id exists in markets table; report missing ids ✓
+- Validate closedTime exists for markets used in expiry-based backtests ✓
+- Produce a data quality report artifact after bootstrap and updates ✓
+
+### PRD features marked as passing:
+- Data quality checks: enforce uniqueness, expected ranges, and referential integrity between trades and markets
+
+### Notes for next person:
+- Call POST /api/data-quality/check after bootstrap or update operations
+- Reports are persisted to SQLite and can be retrieved via API
+- The checker gracefully handles missing Parquet files
+- markets_without_closed_time is a warning, not a failure (is_valid can still be true)
+- Issues include sample values (up to 10) for debugging
+- Use run_type parameter to tag reports as "bootstrap" or "update"
