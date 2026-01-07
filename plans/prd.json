@@ -97,7 +97,7 @@
           "Verify watermark advances and is persisted",
           "Verify runtime is proportional to new data (not total history)"
         ],
-        "passes": false
+        "passes": true
     },
     {
       "category": "functional",
@@ -109,7 +109,7 @@
         "Verify dedupe key logic is enforced (transactionHash or composite)",
         "Verify logs explicitly report dedupe/skips"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "functional",

@@ -429,3 +429,85 @@ Implemented immutable raw layer and curated analytics layer separation for trade
 - Implement the search indices (BM25 + vector search)
 - Implement election group concept for "buy the favorite" backtests
 - Implement backtest v1: buy favorite at 90 days to expiry
+
+---
+
+## 2026-01-06: Incremental Updates with Watermark-Based Fetching Feature
+
+### What was done:
+Implemented the incremental update pipeline using watermark-based filtering to fetch only new data since the last update, with deduplication to ensure idempotent updates.
+
+### Features implemented:
+1. **Incremental update pipeline** (`src/polymkt/pipeline/update.py`)
+   - Reads current watermarks from metadata store for each entity
+   - Filters incoming data to only rows after the watermark timestamp
+   - Supports watermark-based filtering for trades, markets, and order_filled
+   - Runtime is proportional to new data, not total history
+
+2. **Deduplication logic**
+   - Uses `transaction_hash` as dedupe key for trades and order_filled
+   - Uses `id` for markets (with upsert support for updates)
+   - Efficiently skips already-ingested data via set lookups
+   - Logs skipped/deduplicated rows for visibility
+
+3. **Upsert/append strategy for Parquet**
+   - Trades/order_filled: Append-only with transaction_hash deduplication
+   - Markets: Full upsert using DuckDB (updates replace existing, new rows added)
+   - Preserves data integrity across repeated update runs
+
+4. **API endpoint** (`src/polymkt/api/main.py`)
+   - `POST /api/update` endpoint for incremental updates
+   - Returns `UpdateSummary` with rows_read, rows_written, rows_skipped, rows_updated
+   - Includes watermark_before and watermark_after for audit trail
+
+5. **UpdateSummary schema** (`src/polymkt/models/schemas.py`)
+   - Pydantic model for update operation results
+   - Tracks all row counts and watermark state changes
+
+### PRD requirements met:
+- Read current watermark from local state ✓
+- Run update to fetch only new data since watermark ✓
+- Append new rows to Parquet ✓
+- Update DuckDB views if needed ✓
+- Verify watermark advances and is persisted ✓
+- Verify runtime is proportional to new data ✓
+- Run incremental update twice without duplicating data ✓
+- Verify dedupe key logic is enforced (transaction_hash) ✓
+- Verify logs explicitly report dedupe/skips ✓
+
+### Tests added (`tests/test_update.py`):
+140 tests passing (11 new tests for incremental updates).
+
+**TestIncrementalUpdate (4 tests):**
+- `test_update_with_new_trades`: Verifies new trades are appended
+- `test_update_with_new_markets`: Verifies new markets are added
+- `test_update_creates_run_record`: Verifies run tracking
+- `test_update_advances_watermark`: Verifies watermark progression
+
+**TestIdempotentUpdates (3 tests):**
+- `test_repeated_update_does_not_duplicate_trades`: Idempotency verification
+- `test_transaction_hash_uniqueness_enforced`: Dedupe key enforcement
+- `test_dedupe_logs_skipped_rows`: Skip logging verification
+
+**TestUpdateRuntimeProportionality (1 test):**
+- `test_update_runtime_scales_with_new_data`: Runtime scaling verification
+
+**TestWatermarkFiltering (1 test):**
+- `test_watermark_filters_old_data`: Watermark filter verification
+
+**TestDuckDBViewsRefresh (1 test):**
+- `test_duckdb_views_reflect_new_data`: View refresh verification
+
+**TestMarketsUpsert (1 test):**
+- `test_existing_market_updated`: Market upsert verification
+
+### PRD features marked as passing:
+- Incremental updates use poly_data-like logic (fast forward from last watermark)
+- Idempotent update runs (re-running the same update does not duplicate trades)
+
+### Next steps for future sessions:
+- Implement schema validation for custom columns (category, closedTime, tags) - events join
+- Implement the search indices (BM25 + vector search)
+- Implement election group concept for "buy the favorite" backtests
+- Implement backtest v1: buy favorite at 90 days to expiry
+- Implement datasets and backtests persistence

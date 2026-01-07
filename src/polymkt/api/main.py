@@ -6,9 +6,10 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from polymkt.config import settings
-from polymkt.models.schemas import BootstrapSummary, CurateSummary, RunRecord
+from polymkt.models.schemas import BootstrapSummary, CurateSummary, RunRecord, UpdateSummary
 from polymkt.pipeline.bootstrap import run_bootstrap
 from polymkt.pipeline.curate import run_curate
+from polymkt.pipeline.update import run_update
 from polymkt.storage.duckdb_layer import DuckDBLayer
 from polymkt.storage.metadata import MetadataStore
 
@@ -107,6 +108,38 @@ def curate_analytics() -> CurateSummary:
         raise HTTPException(status_code=404, detail=f"Raw data not found: {e}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Curate failed: {e}")
+
+
+@app.post("/api/update", response_model=UpdateSummary)
+def incremental_update() -> UpdateSummary:
+    """
+    Run an incremental update from the last watermark.
+
+    This endpoint performs an incremental update that:
+    1. Reads current watermarks for each entity (trades, markets, order_filled)
+    2. Reads new data from CSV files (simulating upstream fetch)
+    3. Filters data to only rows after the watermark timestamp
+    4. Deduplicates using transaction_hash (trades/order_filled) or id (markets)
+    5. Appends new rows to Parquet files (or upserts for markets)
+    6. Updates watermarks to the max timestamp of new data
+    7. Refreshes DuckDB views
+
+    The runtime is proportional to new data, not total history.
+
+    Response includes:
+    - rows_read: Total rows read from source per entity
+    - rows_written: New rows written per entity
+    - rows_skipped: Rows skipped due to deduplication per entity
+    - rows_updated: Rows updated (for markets upsert)
+    - watermark_before/after: Watermark state before and after the update
+    """
+    try:
+        summary = run_update()
+        return summary
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=f"Data file not found: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Update failed: {e}")
 
 
 @app.get("/api/runs", response_model=RunListResponse)

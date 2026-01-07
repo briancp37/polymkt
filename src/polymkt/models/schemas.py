@@ -103,3 +103,32 @@ class CurateSummary(BaseModel):
     trades_rows_read: int
     trades_rows_written: int
     analytics_files: list[str]
+
+
+class UpdateSummary(BaseModel):
+    """Summary of an incremental update operation."""
+
+    run_id: str
+    status: str
+    duration_seconds: float
+    rows_read: dict[str, int] = Field(
+        default_factory=dict, description="Rows read per entity from source"
+    )
+    rows_written: dict[str, int] = Field(
+        default_factory=dict, description="New rows written per entity"
+    )
+    rows_skipped: dict[str, int] = Field(
+        default_factory=dict, description="Rows skipped due to deduplication per entity"
+    )
+    rows_updated: dict[str, int] = Field(
+        default_factory=dict, description="Rows updated (for markets upsert)"
+    )
+    rows_quarantined: dict[str, int] = Field(
+        default_factory=dict, description="Rows quarantined due to validation errors"
+    )
+    watermark_before: dict[str, Any] = Field(
+        default_factory=dict, description="Watermarks before the update"
+    )
+    watermark_after: dict[str, Any] = Field(
+        default_factory=dict, description="Watermarks after the update"
+    )

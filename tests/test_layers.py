@@ -472,9 +472,9 @@ class TestBackwardCompatibility:
 
             # Query using alias views (should work like raw views)
             result = duckdb_layer.execute("SELECT COUNT(*) FROM v_trades").fetchone()
-            assert result[0] == 5
+            assert result is not None and result[0] == 5
 
             result = duckdb_layer.execute("SELECT COUNT(*) FROM v_markets").fetchone()
-            assert result[0] == 3
+            assert result is not None and result[0] == 3
         finally:
             duckdb_layer.close()
