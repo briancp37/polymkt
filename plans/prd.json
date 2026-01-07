@@ -304,7 +304,7 @@
           "Run a semantic query (e.g., 'voter turnout prediction')",
           "Verify the system returns relevant markets even when exact keywords are absent"
         ],
-        "passes": false
+        "passes": true
     },
     {
       "category": "functional",

@@ -710,3 +710,112 @@ Implemented the BM25 full-text search index for markets using DuckDB's FTS exten
 - Implement Markets Search API endpoint with snippets/highlights
 - Implement election group concept for "buy the favorite" backtests
 - Implement backtest v1: buy favorite at 90 days to expiry
+
+---
+
+## 2026-01-07: Semantic Search Index Feature (OpenAI Embeddings)
+
+### What was done:
+Implemented semantic search for markets using OpenAI embeddings and DuckDB's vector similarity search (vss) extension, enabling semantic discovery of markets even when exact keywords are absent.
+
+### Features implemented:
+1. **Semantic search index module** (`src/polymkt/storage/semantic_search.py`)
+   - `SemanticSearchIndex` class manages OpenAI embeddings and DuckDB vss extension
+   - `create_embeddings_table()` creates market_embeddings table with FLOAT[] embedding column
+   - `create_vss_index()` creates HNSW index for approximate nearest neighbor search
+   - `build_index()` generates embeddings for all markets using OpenAI API (batched)
+   - `search()` performs vector similarity search with cosine metric
+   - `update_markets()` updates embeddings for specific market IDs (incremental)
+   - `refresh_index()` rebuilds the entire index
+   - `get_embedding_stats()` returns index statistics
+
+2. **Embedding generation**
+   - Uses OpenAI embeddings API (default: text-embedding-3-small)
+   - Combines question + tags + description for embedding input
+   - Batched API calls for efficiency (configurable batch_size)
+   - Stores embedding_model and embedding_dim with each embedding
+
+3. **Vector similarity search**
+   - DuckDB vss extension with HNSW index for efficient ANN queries
+   - Cosine similarity metric (0-1 range, higher is better)
+   - Supports filtering by category, closed_time_min/max
+   - Pagination with limit/offset and total_count
+
+4. **API endpoints** (`src/polymkt/api/main.py`)
+   - `POST /api/semantic-search/build` - Build/rebuild semantic search index
+   - `GET /api/markets/semantic-search` - Search with semantic similarity
+     - Query params: q, limit, offset, category, closed_time_min, closed_time_max
+   - `GET /api/semantic-search/stats` - Get embeddings index statistics
+
+5. **Configuration** (`src/polymkt/config.py`)
+   - `openai_api_key` - API key for OpenAI (POLYMKT_OPENAI_API_KEY env var)
+   - `openai_embedding_model` - Model to use (default: text-embedding-3-small)
+   - `openai_embedding_dimensions` - Embedding vector size (default: 1536)
+
+6. **Schema models** (`src/polymkt/models/schemas.py`)
+   - `SemanticSearchResult` - Search result with cosine similarity score
+   - `EmbeddingStats` - Statistics about the embeddings index
+
+### PRD requirements met:
+- Ensure markets.tags is derived by joining to events ✓ (from events bootstrap)
+- Generate OpenAI embeddings for each market using question + tags + description ✓
+- Store embedding_model + embedding_dim with embeddings ✓
+- Store embeddings in a DuckDB table keyed by market_id ✓
+- Enable DuckDB vss extension and create an ANN index ✓ (HNSW with cosine metric)
+- Run a semantic query ✓
+- Verify system returns relevant markets even when exact keywords are absent ✓
+
+### Tests added (`tests/test_semantic_search.py`):
+215 tests total (25 new tests for semantic search feature).
+
+**TestSemanticSearchIndexCreation (4 tests):**
+- `test_create_embeddings_table`: Table structure verification
+- `test_create_vss_index`: VSS index creation
+- `test_build_index_creates_embeddings_for_all_markets`: Full index build
+- `test_embeddings_store_model_and_dimension`: Metadata storage
+
+**TestSemanticSearch (4 tests):**
+- `test_search_returns_results`: Basic search functionality
+- `test_search_returns_similarity_scores`: Score verification
+- `test_search_results_sorted_by_similarity`: Descending sort
+- `test_search_returns_market_metadata`: Metadata fields present
+
+**TestSemanticSearchFiltering (4 tests):**
+- `test_filter_by_category`: Category filter
+- `test_filter_by_closed_time_min`: Min date filter
+- `test_filter_by_closed_time_range`: Date range filter
+- `test_combined_category_and_time_filter`: Combined filters
+
+**TestSemanticSearchPagination (3 tests):**
+- `test_pagination_limit`: Limit parameter
+- `test_pagination_offset`: Offset parameter
+- `test_total_count_for_pagination_ui`: Total count for UI
+
+**TestSemanticSearchIndexMaintenance (3 tests):**
+- `test_refresh_index_rebuilds_completely`: Full rebuild
+- `test_update_markets_updates_specific_rows`: Incremental update
+- `test_update_markets_with_empty_list`: Edge case
+
+**TestSemanticSearchEdgeCases (4 tests):**
+- `test_search_without_building_index_raises_error`: Error handling
+- `test_search_without_api_key_raises_error`: API key validation
+- `test_get_embedding_stats_with_no_embeddings`: Empty stats
+- `test_get_embedding_stats_with_embeddings`: Stats after build
+
+**TestSemanticSearchAPIIntegration (3 tests):**
+- `test_api_build_semantic_index_requires_api_key`: API key check
+- `test_api_semantic_search_requires_api_key`: API key check
+- `test_api_get_embedding_stats`: Stats endpoint
+
+### Dependencies added:
+- `openai>=1.0.0` in pyproject.toml
+
+### PRD features marked as passing:
+- Create a semantic search index (OpenAI embeddings) for markets using question + event-derived tags
+
+### Next steps for future sessions:
+- Implement hybrid search (combine BM25 and embedding results)
+- Implement incremental search index updates for both BM25 and embeddings
+- Implement Markets Search API endpoint with snippets/highlights
+- Implement election group concept for "buy the favorite" backtests
+- Implement backtest v1: buy favorite at 90 days to expiry

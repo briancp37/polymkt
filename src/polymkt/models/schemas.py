@@ -159,3 +159,25 @@ class MarketSearchResult(BaseModel):
     closed_time: datetime | None = Field(None, description="Market close time")
     event_id: str | None = Field(None, description="Parent event ID")
     score: float = Field(..., description="BM25 relevance score")
+
+
+class SemanticSearchResult(BaseModel):
+    """A single semantic search result with cosine similarity score."""
+
+    id: str = Field(..., description="Market ID")
+    question: str = Field(..., description="Market question")
+    tags: list[str] | None = Field(None, description="Market tags derived from event")
+    category: str | None = Field(None, description="Market category")
+    closed_time: datetime | None = Field(None, description="Market close time")
+    event_id: str | None = Field(None, description="Parent event ID")
+    score: float = Field(..., description="Cosine similarity score (0-1, higher is better)")
+
+
+class EmbeddingStats(BaseModel):
+    """Statistics about the embeddings index."""
+
+    total_embeddings: int = Field(..., description="Total number of market embeddings")
+    embedding_model: str | None = Field(None, description="OpenAI model used for embeddings")
+    embedding_dim: int | None = Field(None, description="Dimension of embedding vectors")
+    first_created: datetime | None = Field(None, description="First embedding creation time")
+    last_created: datetime | None = Field(None, description="Last embedding creation time")

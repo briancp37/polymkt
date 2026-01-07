@@ -9,8 +9,10 @@ from polymkt.config import settings
 from polymkt.models.schemas import (
     BootstrapSummary,
     CurateSummary,
+    EmbeddingStats,
     MarketSearchResult,
     RunRecord,
+    SemanticSearchResult,
     UpdateSummary,
 )
 from polymkt.pipeline.bootstrap import run_bootstrap
@@ -19,6 +21,7 @@ from polymkt.pipeline.update import run_update
 from polymkt.storage.duckdb_layer import DuckDBLayer
 from polymkt.storage.metadata import MetadataStore
 from polymkt.storage.search import MarketSearchIndex
+from polymkt.storage.semantic_search import SemanticSearchIndex
 
 app = FastAPI(
     title="Polymkt Analytics API",
@@ -102,6 +105,24 @@ class BuildSearchIndexResponse(BaseModel):
 
     status: str
     markets_indexed: int
+
+
+class SemanticSearchResponse(BaseModel):
+    """Response for semantic search."""
+
+    results: list[SemanticSearchResult]
+    count: int
+    total_count: int
+    has_more: bool
+
+
+class BuildSemanticIndexResponse(BaseModel):
+    """Response for building semantic search index."""
+
+    status: str
+    markets_indexed: int
+    embedding_model: str
+    embedding_dimensions: int
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -422,5 +443,183 @@ def query_trades_with_markets(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        duckdb_layer.close()
+
+
+@app.post("/api/semantic-search/build", response_model=BuildSemanticIndexResponse)
+def build_semantic_index() -> BuildSemanticIndexResponse:
+    """
+    Build or rebuild the semantic search index for markets using OpenAI embeddings.
+
+    This creates embeddings for all markets using the configured OpenAI embedding model
+    (default: text-embedding-3-small) and stores them in DuckDB with a vss (vector
+    similarity search) index for efficient approximate nearest neighbor queries.
+
+    Requires POLYMKT_OPENAI_API_KEY environment variable to be set.
+    """
+    if not settings.openai_api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="OpenAI API key not configured. Set POLYMKT_OPENAI_API_KEY environment variable.",
+        )
+
+    if not (settings.parquet_dir / "markets.parquet").exists():
+        raise HTTPException(
+            status_code=400,
+            detail="Markets data not available. Run bootstrap first.",
+        )
+
+    duckdb_layer = DuckDBLayer(settings.duckdb_path, settings.parquet_dir)
+    try:
+        duckdb_layer.create_views()
+
+        semantic_index = SemanticSearchIndex(
+            conn=duckdb_layer.conn,
+            openai_api_key=settings.openai_api_key,
+            embedding_model=settings.openai_embedding_model,
+            embedding_dimensions=settings.openai_embedding_dimensions,
+        )
+        markets_indexed = semantic_index.build_index()
+
+        return BuildSemanticIndexResponse(
+            status="success",
+            markets_indexed=markets_indexed,
+            embedding_model=settings.openai_embedding_model,
+            embedding_dimensions=settings.openai_embedding_dimensions,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to build semantic index: {e}")
+    finally:
+        duckdb_layer.close()
+
+
+@app.get("/api/markets/semantic-search", response_model=SemanticSearchResponse)
+def semantic_search_markets(
+    q: str,
+    limit: int = 50,
+    offset: int = 0,
+    category: str | None = None,
+    closed_time_min: str | None = None,
+    closed_time_max: str | None = None,
+) -> SemanticSearchResponse:
+    """
+    Search markets using semantic similarity with OpenAI embeddings.
+
+    This endpoint uses vector similarity search to find markets semantically
+    similar to the query, even when exact keywords are not present.
+
+    For example, searching "voter turnout prediction" will find relevant
+    election markets even if they don't contain those exact words.
+
+    Args:
+        q: Search query string (required)
+        limit: Maximum results to return (default 50)
+        offset: Number of results to skip for pagination (default 0)
+        category: Filter by market category (optional)
+        closed_time_min: Filter by minimum closed_time (optional)
+        closed_time_max: Filter by maximum closed_time (optional)
+
+    Returns:
+        Paginated search results with cosine similarity scores (0-1, higher is better)
+    """
+    if not settings.openai_api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="OpenAI API key not configured. Set POLYMKT_OPENAI_API_KEY environment variable.",
+        )
+
+    if not (settings.parquet_dir / "markets.parquet").exists():
+        raise HTTPException(
+            status_code=400,
+            detail="Markets data not available. Run bootstrap first.",
+        )
+
+    duckdb_layer = DuckDBLayer(settings.duckdb_path, settings.parquet_dir)
+    try:
+        duckdb_layer.create_views()
+
+        semantic_index = SemanticSearchIndex(
+            conn=duckdb_layer.conn,
+            openai_api_key=settings.openai_api_key,
+            embedding_model=settings.openai_embedding_model,
+            embedding_dimensions=settings.openai_embedding_dimensions,
+        )
+
+        results_raw, total_count = semantic_index.search(
+            query=q,
+            limit=limit,
+            offset=offset,
+            category=category,
+            closed_time_min=closed_time_min,
+            closed_time_max=closed_time_max,
+        )
+
+        results = [
+            SemanticSearchResult(
+                id=r["id"],
+                question=r["question"],
+                tags=r["tags"] if r["tags"] else None,
+                category=r["category"],
+                closed_time=r["closed_time"],
+                event_id=r["event_id"],
+                score=r["score"],
+            )
+            for r in results_raw
+        ]
+
+        has_more = (offset + len(results)) < total_count
+        return SemanticSearchResponse(
+            results=results,
+            count=len(results),
+            total_count=total_count,
+            has_more=has_more,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Semantic search failed: {e}")
+    finally:
+        duckdb_layer.close()
+
+
+@app.get("/api/semantic-search/stats", response_model=EmbeddingStats)
+def get_embedding_stats() -> EmbeddingStats:
+    """
+    Get statistics about the semantic search embeddings index.
+
+    Returns information about the current state of the embeddings table,
+    including total count, model used, and creation timestamps.
+    """
+    if not (settings.parquet_dir / "markets.parquet").exists():
+        raise HTTPException(
+            status_code=400,
+            detail="Markets data not available. Run bootstrap first.",
+        )
+
+    duckdb_layer = DuckDBLayer(settings.duckdb_path, settings.parquet_dir)
+    try:
+        duckdb_layer.create_views()
+
+        semantic_index = SemanticSearchIndex(
+            conn=duckdb_layer.conn,
+            openai_api_key=settings.openai_api_key,
+            embedding_model=settings.openai_embedding_model,
+            embedding_dimensions=settings.openai_embedding_dimensions,
+        )
+
+        stats = semantic_index.get_embedding_stats()
+
+        return EmbeddingStats(
+            total_embeddings=stats["total_embeddings"],
+            embedding_model=stats["embedding_model"],
+            embedding_dim=stats["embedding_dim"],
+            first_created=stats["first_created"],
+            last_created=stats["last_created"],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get embedding stats: {e}")
     finally:
         duckdb_layer.close()

@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2.6.0",
     "pydantic-settings>=2.1.0",
     "structlog>=24.1.0",
+    "openai>=1.0.0",
 ]
 
 [project.optional-dependencies]
