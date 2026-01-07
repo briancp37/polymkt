@@ -455,3 +455,87 @@ class BacktestListResponse(BaseModel):
     count: int = Field(..., description="Number of backtests in this response")
     total_count: int = Field(..., description="Total number of backtests")
     has_more: bool = Field(..., description="Whether more backtests exist")
+
+
+# =============================================================================
+# Election group schemas for grouping related markets
+# =============================================================================
+
+
+class ElectionGroupSchema(BaseModel):
+    """Schema for an election group (collection of related markets)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(..., description="Election group ID (UUID)")
+    name: str = Field(..., description="Group name (e.g., '2024 Presidential Election')")
+    description: str | None = Field(None, description="Group description")
+    market_ids: list[str] = Field(default_factory=list, description="Market IDs in this group")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+
+
+class ElectionGroupCreateRequest(BaseModel):
+    """Request to create a new election group."""
+
+    name: str = Field(..., min_length=1, max_length=255, description="Group name")
+    description: str | None = Field(None, max_length=2000, description="Group description")
+    market_ids: list[str] = Field(
+        default_factory=list, description="Initial market IDs to include"
+    )
+
+
+class ElectionGroupUpdateRequest(BaseModel):
+    """Request to update an existing election group."""
+
+    name: str | None = Field(None, min_length=1, max_length=255, description="Group name")
+    description: str | None = Field(None, max_length=2000, description="Group description")
+    market_ids: list[str] | None = Field(
+        None, description="Market IDs (replaces existing if provided)"
+    )
+
+
+class ElectionGroupSummary(BaseModel):
+    """Summary of an election group for list views."""
+
+    id: str = Field(..., description="Election group ID")
+    name: str = Field(..., description="Group name")
+    description: str | None = Field(None, description="Group description")
+    market_count: int = Field(..., description="Number of markets in the group")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+
+
+class ElectionGroupListResponse(BaseModel):
+    """Response for listing election groups."""
+
+    groups: list[ElectionGroupSummary] = Field(..., description="List of group summaries")
+    count: int = Field(..., description="Number of groups in this response")
+    total_count: int = Field(..., description="Total number of groups")
+    has_more: bool = Field(..., description="Whether more groups exist")
+
+
+class ElectionGroupImportResult(BaseModel):
+    """Result of importing election group mappings."""
+
+    groups_created: int = Field(..., description="Number of new groups created")
+    markets_mapped: int = Field(..., description="Number of markets mapped to groups")
+    errors: list[str] = Field(default_factory=list, description="Import errors")
+
+
+class ElectionGroupValidationResult(BaseModel):
+    """Result of validating election groups."""
+
+    total_groups: int = Field(..., description="Total number of groups")
+    valid_groups: int = Field(..., description="Groups meeting minimum requirements")
+    invalid_groups: int = Field(..., description="Groups with issues")
+    issues: list[dict[str, Any]] = Field(default_factory=list, description="Validation issues")
+    min_markets_required: int = Field(..., description="Minimum markets required per group")
+
+
+class UnmappedMarketsResult(BaseModel):
+    """Result of finding unmapped markets."""
+
+    unmapped_market_ids: list[str] = Field(..., description="Markets not in any group")
+    total_checked: int = Field(..., description="Total markets checked")
+    unmapped_count: int = Field(..., description="Count of unmapped markets")

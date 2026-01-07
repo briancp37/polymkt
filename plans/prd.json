@@ -169,7 +169,7 @@
         "Verify missing mappings are reported clearly (unmapped market_ids list)",
         "Verify grouping can be edited without re-importing all trades"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "functional",

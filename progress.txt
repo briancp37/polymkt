@@ -1394,3 +1394,141 @@ Implemented the Backtests persistence feature that allows users to save, list, u
 - Implement poly_data integration for live updates
 - Implement Dataset Agent (natural language filters)
 - Implement Backtesting Agent (natural language strategy requests)
+
+---
+
+## 2026-01-07: Election Group Concept Feature
+
+### What was done:
+Implemented the election group concept that allows grouping related markets (e.g., candidates in an election) so that strategies like "buy the favorite" can compare prices across markets within the same group.
+
+### Features implemented:
+1. **ElectionGroupStore class** (`src/polymkt/storage/election_groups.py`)
+   - SQLite-backed storage for election groups and market mappings
+   - `create_group()` - Create a new election group with optional market IDs
+   - `get_group()` - Retrieve a group by ID with all its market IDs
+   - `update_group()` - Update group name, description, or market list
+   - `delete_group()` - Remove a group and all its market mappings
+   - `list_groups()` - Paginated listing with market_count summaries
+
+2. **Market-to-group operations**
+   - `add_markets_to_group()` - Incrementally add markets (skips duplicates)
+   - `remove_markets_from_group()` - Remove specific markets from a group
+   - `get_group_for_market()` - Find the group containing a specific market
+   - `get_markets_by_group()` - Get all mappings grouped by group ID
+
+3. **Validation and unmapped market detection**
+   - `validate_groups()` - Check groups have minimum markets (default 2)
+   - `find_unmapped_markets()` - Identify markets not in any group
+
+4. **Import/export functionality**
+   - `import_from_csv()` - Import from CSV with columns: election_group_id, market_id, election_group_name, election_group_description
+   - `import_from_json()` - Import from JSON array of group objects
+   - `export_to_json()` - Export all groups to JSON format
+
+5. **Schema models** (`src/polymkt/models/schemas.py:459-541`)
+   - `ElectionGroupSchema` - Full election group model
+   - `ElectionGroupCreateRequest` - Group creation request
+   - `ElectionGroupUpdateRequest` - Partial update request
+   - `ElectionGroupSummary` - Summary for list views with market_count
+   - `ElectionGroupListResponse` - Paginated list response
+   - `ElectionGroupImportResult` - Import operation results
+   - `ElectionGroupValidationResult` - Validation report
+   - `UnmappedMarketsResult` - Unmapped markets report
+
+6. **API endpoints** (`src/polymkt/api/main.py:1385-1776`)
+   - `POST /api/election-groups` - Create a new group
+   - `GET /api/election-groups` - List groups with pagination
+   - `GET /api/election-groups/{group_id}` - Get group by ID
+   - `PUT /api/election-groups/{group_id}` - Update a group
+   - `DELETE /api/election-groups/{group_id}` - Delete a group
+   - `POST /api/election-groups/{group_id}/markets` - Add markets to group
+   - `POST /api/election-groups/{group_id}/markets/remove` - Remove markets from group
+   - `POST /api/election-groups/import/csv` - Import from CSV
+   - `POST /api/election-groups/import/json` - Import from JSON
+   - `POST /api/election-groups/validate` - Validate groups
+   - `POST /api/election-groups/unmapped` - Find unmapped markets
+   - `GET /api/markets/{market_id}/election-group` - Get group for a market
+
+### PRD requirements met:
+- Provide a mapping input that groups market_ids into election_group_id (CSV/JSON or derived from markets fields) ✓
+- Load the mapping into DuckDB (or a small SQLite table) and join to markets ✓ (SQLite-backed)
+- Verify each group has 2+ candidate markets where 'favorite' makes sense ✓ (validate_groups endpoint)
+- Verify missing mappings are reported clearly (unmapped market_ids list) ✓ (find_unmapped_markets endpoint)
+- Verify grouping can be edited without re-importing all trades ✓ (market add/remove endpoints)
+
+### Tests added (`tests/test_election_groups.py`):
+442 tests total (53 new tests for election groups feature).
+
+**TestElectionGroupStoreCreation (2 tests):**
+- `test_init_creates_table`: Table creation verification
+- `test_init_creates_parent_dirs`: Directory creation
+
+**TestElectionGroupCreate (4 tests):**
+- `test_create_group_basic`: Basic group creation
+- `test_create_group_with_description`: Group with description
+- `test_create_group_with_markets`: Group with initial markets
+- `test_create_multiple_groups`: Multiple groups
+
+**TestElectionGroupGet (2 tests):**
+- `test_get_group_by_id`: Get by ID
+- `test_get_nonexistent_group_raises`: 404 handling
+
+**TestElectionGroupUpdate (5 tests):**
+- `test_update_group_name`: Update name
+- `test_update_group_description`: Update description
+- `test_update_group_market_ids`: Update market list
+- `test_update_nonexistent_group_raises`: 404 handling
+- `test_update_preserves_created_at`: Timestamp preservation
+
+**TestElectionGroupDelete (3 tests):**
+- `test_delete_group`: Delete functionality
+- `test_delete_nonexistent_group_raises`: 404 handling
+- `test_delete_removes_market_mappings`: Cascade delete
+
+**TestElectionGroupList (5 tests):**
+- `test_list_empty`: Empty list
+- `test_list_returns_summaries`: Summary format with market_count
+- `test_list_pagination_limit`: Limit parameter
+- `test_list_pagination_offset`: Offset parameter
+- `test_list_ordered_by_updated_at`: Ordering
+
+**TestElectionGroupMarketOperations (6 tests):**
+- `test_add_markets_to_group`: Add markets
+- `test_add_markets_skips_duplicates`: Duplicate handling
+- `test_remove_markets_from_group`: Remove markets
+- `test_get_group_for_market`: Market to group lookup
+- `test_get_group_for_market_not_found`: Unmapped market
+- `test_get_markets_by_group`: All mappings
+
+**TestElectionGroupValidation (5 tests):**
+- `test_validate_groups_all_valid`: All groups valid
+- `test_validate_groups_with_invalid`: Invalid group detection
+- `test_find_unmapped_markets`: Find unmapped markets
+- `test_find_unmapped_markets_all_mapped`: All mapped case
+- `test_find_unmapped_markets_empty_list`: Empty list case
+
+**TestElectionGroupImport (4 tests):**
+- `test_import_from_csv`: CSV import
+- `test_import_from_json`: JSON import
+- `test_import_from_json_with_id`: JSON with explicit IDs
+- `test_export_to_json`: Export functionality
+
+**TestElectionGroupAPI* (17 tests):**
+- API endpoint tests for all CRUD operations, market add/remove, validation
+
+**TestElectionGroupIntegration (2 tests):**
+- `test_full_crud_workflow`: Complete CRUD workflow
+- `test_edit_grouping_without_reimporting_trades`: PRD requirement verification
+
+### PRD features marked as passing:
+- Support an 'election group' concept so 'buy the favorite' can be computed across a set of related markets
+
+### Next steps for future sessions:
+- Implement favorite definition at 90-days snapshot
+- Implement backtest v1: buy favorite at 90 days to expiry
+- Implement backtest assumptions (fees/slippage in execution)
+- Implement poly_data integration for live updates
+- Implement Dataset Agent (natural language filters)
+- Implement Backtesting Agent (natural language strategy requests)
+- Implement FastAPI endpoints for bootstrap, update, query, dataset CRUD, and backtest execution

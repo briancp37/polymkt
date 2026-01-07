@@ -19,6 +19,13 @@ from polymkt.models.schemas import (
     DatasetSchema,
     DatasetSummary,
     DatasetUpdateRequest,
+    ElectionGroupCreateRequest,
+    ElectionGroupImportResult,
+    ElectionGroupListResponse,
+    ElectionGroupSchema,
+    ElectionGroupSummary,
+    ElectionGroupUpdateRequest,
+    ElectionGroupValidationResult,
     EmbeddingStats,
     HybridIndexStats,
     HybridSearchResult,
@@ -28,6 +35,7 @@ from polymkt.models.schemas import (
     SearchIndexUpdaterStats,
     SemanticSearchResult,
     UnifiedMarketSearchResult,
+    UnmappedMarketsResult,
     UpdateSummary,
 )
 from polymkt.pipeline.bootstrap import run_bootstrap
@@ -35,6 +43,7 @@ from polymkt.pipeline.curate import run_curate
 from polymkt.pipeline.update import run_update
 from polymkt.storage.backtests import BacktestNotFoundError, BacktestStore
 from polymkt.storage.datasets import DatasetNotFoundError, DatasetStore
+from polymkt.storage.election_groups import ElectionGroupNotFoundError, ElectionGroupStore
 from polymkt.storage.duckdb_layer import DuckDBLayer
 from polymkt.storage.metadata import MetadataStore
 from polymkt.storage.search import MarketSearchIndex
@@ -1371,3 +1380,397 @@ def delete_backtest(backtest_id: str) -> dict[str, str]:
         raise HTTPException(status_code=404, detail=f"Backtest not found: {backtest_id}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete backtest: {e}")
+
+
+# =============================================================================
+# Election Group CRUD endpoints for grouping related markets
+# =============================================================================
+
+
+@app.post("/api/election-groups", response_model=ElectionGroupSchema, status_code=201)
+def create_election_group(request: ElectionGroupCreateRequest) -> ElectionGroupSchema:
+    """
+    Create a new election group with a set of related markets.
+
+    An election group is a collection of related markets (e.g., candidates
+    in an election race). Groups are used to compute "buy the favorite"
+    strategies by comparing prices across markets within the same group.
+
+    Groups should have at least 2 markets to make favorite determination
+    meaningful.
+
+    Args:
+        request: Group creation request with name, description, and market_ids
+
+    Returns:
+        The created election group with generated ID and timestamps
+    """
+    try:
+        group_store = ElectionGroupStore(settings.metadata_db_path)
+        result = group_store.create_group(
+            name=request.name,
+            description=request.description,
+            market_ids=request.market_ids,
+        )
+        return ElectionGroupSchema(
+            id=result["id"],
+            name=result["name"],
+            description=result["description"],
+            market_ids=result["market_ids"],
+            created_at=result["created_at"],
+            updated_at=result["updated_at"],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create election group: {e}")
+
+
+@app.get("/api/election-groups", response_model=ElectionGroupListResponse)
+def list_election_groups(limit: int = 50, offset: int = 0) -> ElectionGroupListResponse:
+    """
+    List all election groups with pagination.
+
+    Returns group summaries (id, name, description, market_count, timestamps)
+    ordered by most recently updated first.
+
+    Args:
+        limit: Maximum number of groups to return (default 50)
+        offset: Number of groups to skip for pagination (default 0)
+
+    Returns:
+        Paginated list of group summaries with total_count and has_more
+    """
+    try:
+        group_store = ElectionGroupStore(settings.metadata_db_path)
+        groups, total_count = group_store.list_groups(limit=limit, offset=offset)
+        summaries = [
+            ElectionGroupSummary(
+                id=g["id"],
+                name=g["name"],
+                description=g["description"],
+                market_count=g["market_count"],
+                created_at=g["created_at"],
+                updated_at=g["updated_at"],
+            )
+            for g in groups
+        ]
+        has_more = (offset + len(summaries)) < total_count
+        return ElectionGroupListResponse(
+            groups=summaries,
+            count=len(summaries),
+            total_count=total_count,
+            has_more=has_more,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list election groups: {e}")
+
+
+@app.get("/api/election-groups/{group_id}", response_model=ElectionGroupSchema)
+def get_election_group(group_id: str) -> ElectionGroupSchema:
+    """
+    Get an election group by ID.
+
+    Returns the full election group including all market_ids.
+
+    Args:
+        group_id: The election group UUID
+
+    Returns:
+        The election group with all fields
+    """
+    try:
+        group_store = ElectionGroupStore(settings.metadata_db_path)
+        result = group_store.get_group(group_id)
+        return ElectionGroupSchema(
+            id=result["id"],
+            name=result["name"],
+            description=result["description"],
+            market_ids=result["market_ids"],
+            created_at=result["created_at"],
+            updated_at=result["updated_at"],
+        )
+    except ElectionGroupNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Election group not found: {group_id}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get election group: {e}")
+
+
+@app.put("/api/election-groups/{group_id}", response_model=ElectionGroupSchema)
+def update_election_group(
+    group_id: str, request: ElectionGroupUpdateRequest
+) -> ElectionGroupSchema:
+    """
+    Update an existing election group.
+
+    Only provided fields are updated; omitted fields retain their existing values.
+    Use this endpoint to:
+    - Rename a group
+    - Update the description
+    - Modify the market list (add/remove markets)
+
+    Args:
+        group_id: The election group UUID
+        request: Fields to update (only provided fields are modified)
+
+    Returns:
+        The updated election group
+    """
+    try:
+        group_store = ElectionGroupStore(settings.metadata_db_path)
+        result = group_store.update_group(
+            group_id,
+            name=request.name,
+            description=request.description,
+            market_ids=request.market_ids,
+        )
+        return ElectionGroupSchema(
+            id=result["id"],
+            name=result["name"],
+            description=result["description"],
+            market_ids=result["market_ids"],
+            created_at=result["created_at"],
+            updated_at=result["updated_at"],
+        )
+    except ElectionGroupNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Election group not found: {group_id}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update election group: {e}")
+
+
+@app.delete("/api/election-groups/{group_id}")
+def delete_election_group(group_id: str) -> dict[str, str]:
+    """
+    Delete an election group.
+
+    This permanently removes the group and all its market mappings.
+    Backtests that used this group will retain their own copies of the data.
+
+    Args:
+        group_id: The election group UUID
+
+    Returns:
+        Confirmation message
+    """
+    try:
+        group_store = ElectionGroupStore(settings.metadata_db_path)
+        group_store.delete_group(group_id)
+        return {"status": "deleted", "group_id": group_id}
+    except ElectionGroupNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Election group not found: {group_id}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete election group: {e}")
+
+
+class MarketIdsRequest(BaseModel):
+    """Request body containing a list of market IDs."""
+
+    market_ids: list[str]
+
+
+@app.post("/api/election-groups/{group_id}/markets")
+def add_markets_to_election_group(
+    group_id: str, request: MarketIdsRequest
+) -> dict[str, Any]:
+    """
+    Add markets to an existing election group.
+
+    This is useful for incrementally building groups without replacing
+    all existing market mappings.
+
+    Args:
+        group_id: The election group UUID
+        request: Request body with market_ids list
+
+    Returns:
+        Number of markets added (excludes duplicates)
+    """
+    try:
+        group_store = ElectionGroupStore(settings.metadata_db_path)
+        added = group_store.add_markets_to_group(group_id, request.market_ids)
+        return {"status": "success", "markets_added": added, "group_id": group_id}
+    except ElectionGroupNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Election group not found: {group_id}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to add markets to group: {e}")
+
+
+@app.post("/api/election-groups/{group_id}/markets/remove")
+def remove_markets_from_election_group(
+    group_id: str, request: MarketIdsRequest
+) -> dict[str, Any]:
+    """
+    Remove markets from an existing election group.
+
+    Args:
+        group_id: The election group UUID
+        request: Request body with market_ids list
+
+    Returns:
+        Number of markets removed
+    """
+    try:
+        group_store = ElectionGroupStore(settings.metadata_db_path)
+        removed = group_store.remove_markets_from_group(group_id, request.market_ids)
+        return {"status": "success", "markets_removed": removed, "group_id": group_id}
+    except ElectionGroupNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Election group not found: {group_id}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to remove markets from group: {e}")
+
+
+@app.post("/api/election-groups/import/csv", response_model=ElectionGroupImportResult)
+def import_election_groups_from_csv(csv_path: str) -> ElectionGroupImportResult:
+    """
+    Import election group mappings from a CSV file.
+
+    The CSV should have columns:
+    - election_group_id (required): The group ID
+    - market_id (required): The market ID to map
+    - election_group_name (optional): Name for new groups
+    - election_group_description (optional): Description for new groups
+
+    New groups are created automatically when a new election_group_id is
+    encountered. Existing groups have markets added to them.
+
+    Args:
+        csv_path: Absolute path to the CSV file
+
+    Returns:
+        Import summary with counts of groups created and markets mapped
+    """
+    from pathlib import Path
+
+    path = Path(csv_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"CSV file not found: {csv_path}")
+
+    try:
+        group_store = ElectionGroupStore(settings.metadata_db_path)
+        result = group_store.import_from_csv(path)
+        return ElectionGroupImportResult(
+            groups_created=result["groups_created"],
+            markets_mapped=result["markets_mapped"],
+            errors=result["errors"],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to import from CSV: {e}")
+
+
+@app.post("/api/election-groups/import/json", response_model=ElectionGroupImportResult)
+def import_election_groups_from_json(json_path: str) -> ElectionGroupImportResult:
+    """
+    Import election group mappings from a JSON file.
+
+    The JSON should be a list of objects with structure:
+    [
+        {
+            "id": "group-uuid" (optional, generated if missing),
+            "name": "Group Name" (required),
+            "description": "Optional description",
+            "market_ids": ["market1", "market2", ...]
+        }
+    ]
+
+    Args:
+        json_path: Absolute path to the JSON file
+
+    Returns:
+        Import summary with counts of groups created and markets mapped
+    """
+    from pathlib import Path
+
+    path = Path(json_path)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"JSON file not found: {json_path}")
+
+    try:
+        group_store = ElectionGroupStore(settings.metadata_db_path)
+        result = group_store.import_from_json(path)
+        return ElectionGroupImportResult(
+            groups_created=result["groups_created"],
+            markets_mapped=result["markets_mapped"],
+            errors=result["errors"],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to import from JSON: {e}")
+
+
+@app.post("/api/election-groups/validate", response_model=ElectionGroupValidationResult)
+def validate_election_groups(min_markets: int = 2) -> ElectionGroupValidationResult:
+    """
+    Validate all election groups and report issues.
+
+    Checks that each group has at least `min_markets` markets, which is
+    required for meaningful favorite determination.
+
+    Args:
+        min_markets: Minimum markets required per group (default 2)
+
+    Returns:
+        Validation report with any issues found
+    """
+    try:
+        group_store = ElectionGroupStore(settings.metadata_db_path)
+        result = group_store.validate_groups(min_markets=min_markets)
+        return ElectionGroupValidationResult(
+            total_groups=result["total_groups"],
+            valid_groups=result["valid_groups"],
+            invalid_groups=result["invalid_groups"],
+            issues=result["issues"],
+            min_markets_required=result["min_markets_required"],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to validate groups: {e}")
+
+
+@app.post("/api/election-groups/unmapped", response_model=UnmappedMarketsResult)
+def find_unmapped_markets(request: MarketIdsRequest) -> UnmappedMarketsResult:
+    """
+    Find markets from a list that are not in any election group.
+
+    This is useful for identifying markets that need to be assigned to
+    groups before running "buy the favorite" backtests.
+
+    Args:
+        request: Request body with market_ids list
+
+    Returns:
+        List of unmapped market IDs with counts
+    """
+    try:
+        group_store = ElectionGroupStore(settings.metadata_db_path)
+        unmapped = group_store.find_unmapped_markets(request.market_ids)
+        return UnmappedMarketsResult(
+            unmapped_market_ids=unmapped,
+            total_checked=len(request.market_ids),
+            unmapped_count=len(unmapped),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to find unmapped markets: {e}")
+
+
+@app.get("/api/markets/{market_id}/election-group")
+def get_election_group_for_market(market_id: str) -> ElectionGroupSchema | dict[str, str]:
+    """
+    Get the election group for a specific market.
+
+    Args:
+        market_id: The market ID to look up
+
+    Returns:
+        The election group containing the market, or a message if not in any group
+    """
+    try:
+        group_store = ElectionGroupStore(settings.metadata_db_path)
+        result = group_store.get_group_for_market(market_id)
+        if result is None:
+            return {"status": "not_found", "message": f"Market {market_id} is not in any election group"}
+        return ElectionGroupSchema(
+            id=result["id"],
+            name=result["name"],
+            description=result["description"],
+            market_ids=result["market_ids"],
+            created_at=result["created_at"],
+            updated_at=result["updated_at"],
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get election group for market: {e}")
