@@ -2061,3 +2061,122 @@ Implemented comprehensive data quality checks for validating trades, markets, an
 - markets_without_closed_time is a warning, not a failure (is_valid can still be true)
 - Issues include sample values (up to 10) for debugging
 - Use run_type parameter to tag reports as "bootstrap" or "update"
+
+---
+
+## 2026-01-07: Schema Evolution Feature
+
+### What was done:
+Implemented the schema evolution nonfunctional feature that ensures adding new columns later does not break reads or backtests. This provides a robust foundation for future schema changes.
+
+### Features implemented:
+1. **Schema evolution module** (`src/polymkt/storage/schema_evolution.py`)
+   - `SchemaEvolutionManager` class for tracking schema versions in SQLite
+   - `register_schema_version()` - Stores schema version with columns and added_columns metadata
+   - `get_current_version()` and `get_all_versions()` for version retrieval
+   - Schema versioning enables tracking changes over time
+
+2. **Parquet schema evolution utilities**
+   - `read_parquet_with_schema_evolution()` - Reads old Parquet files with new schema
+   - `project_to_schema()` - Projects tables to target schema, filling missing columns with nulls
+   - Enables reading old partitions seamlessly with newer schema definitions
+
+3. **DuckDB view evolution support**
+   - `create_evolution_safe_view()` - Creates views that handle NULL values gracefully
+   - `get_safe_column_sql()` - Generates SQL for safe column access with COALESCE/TRY_CAST
+   - Views use union_by_name=true for reading mixed-schema partitions
+
+4. **Safe column access for backtest code**
+   - `safe_get()` function for dictionary access with type checking and defaults
+   - Handles missing columns, None values, and type conversions gracefully
+   - Example: `safe_get(trade, "trade_source", "legacy", str)`
+
+5. **Schema change detection**
+   - `detect_schema_changes()` - Detects added, removed, and type-changed columns
+   - Returns tuple of (added_columns, removed_columns, type_changed_columns)
+   - Useful for migration scripts and debugging
+
+### PRD requirements met:
+- Bootstrap baseline schema and validate queries/backtests work ✓
+- Add new derived columns in the analytics layer ✓ (days_to_exp in analytics)
+- Verify older partitions remain readable ✓ (union_by_name + project_to_schema)
+- Verify query layer selects required columns safely ✓ (safe_get, COALESCE)
+- Verify backtest code handles missing optional columns gracefully ✓
+
+### Tests added (`tests/test_schema_evolution.py`):
+559 tests total (28 new tests for schema evolution).
+
+**TestSchemaEvolutionManager (5 tests):**
+- `test_init_creates_table`: Table creation verification
+- `test_register_schema_version`: Basic registration
+- `test_register_multiple_versions`: Multiple version tracking
+- `test_get_all_versions`: Version history retrieval
+- `test_get_current_version_none_when_empty`: Empty state handling
+
+**TestReadParquetWithSchemaEvolution (4 tests):**
+- `test_read_old_parquet_with_new_schema`: Old file with new schema
+- `test_project_to_schema_fills_missing_columns`: NULL filling
+- `test_project_to_schema_drops_extra_columns`: Column pruning
+- `test_project_to_schema_casts_types`: Type conversion
+
+**TestOlderPartitionsRemainReadable (1 test):**
+- `test_partitioned_data_with_mixed_schemas`: Mixed-schema partition reading
+
+**TestQueryLayerSafeColumnAccess (4 tests):**
+- `test_get_safe_column_sql_*`: SQL generation tests
+- `test_create_evolution_safe_view`: View creation with defaults
+
+**TestBacktestSafeColumnAccess (6 tests):**
+- `test_safe_get_*`: Safe dictionary access tests
+- `test_backtest_with_missing_optional_column`: End-to-end backtest simulation
+
+**TestSchemaChangeDetection (4 tests):**
+- `test_detect_added_columns`: Added column detection
+- `test_detect_removed_columns`: Removed column detection
+- `test_detect_type_changes`: Type change detection
+- `test_detect_multiple_changes`: Multiple changes detection
+
+**TestDuckDBViewsWithSchemaEvolution (2 tests):**
+- `test_duckdb_union_by_name_handles_missing_columns`: DuckDB union handling
+- `test_view_with_coalesce_for_optional_columns`: COALESCE view patterns
+
+**TestSchemaEvolutionIntegration (2 tests):**
+- `test_full_schema_evolution_workflow`: Complete workflow test
+- `test_analytics_layer_can_add_derived_columns`: Raw/analytics separation
+
+### PRD features marked as passing:
+- Schema evolution: adding new columns later (e.g., tags or additional market metadata) should not break reads or backtests
+
+### Key patterns for schema evolution:
+
+1. **Reading mixed-schema partitions with DuckDB:**
+   ```sql
+   SELECT * FROM read_parquet('trades/**/*.parquet', union_by_name=true)
+   ```
+
+2. **Safe column access in Python:**
+   ```python
+   from polymkt.storage.schema_evolution import safe_get
+   trade_source = safe_get(trade, "trade_source", "legacy", str)
+   ```
+
+3. **Projecting to target schema:**
+   ```python
+   from polymkt.storage.schema_evolution import project_to_schema
+   projected = project_to_schema(old_table, new_schema)
+   ```
+
+### Notes for next person:
+- The existing raw/analytics layer separation already supports schema evolution well
+- DuckDB's union_by_name parameter is the key for reading mixed-schema data
+- Use safe_get() in backtest and query code for forward compatibility
+- Schema versions are tracked in SQLite for audit trail
+- The analytics layer is where derived columns should be added (not raw)
+- 559 tests all pass with these changes
+
+### Next steps for future sessions:
+- Implement cost efficiency nonfunctional feature
+- Implement performance benchmarking nonfunctional feature
+- Implement Dataset Agent (natural language filters)
+- Implement Backtesting Agent (natural language strategy requests)
+- Implement React frontend for datasets/backtests UX

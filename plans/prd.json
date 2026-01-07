@@ -496,7 +496,7 @@
         "Verify query layer selects required columns safely",
         "Verify backtest code handles missing optional columns gracefully"
       ],
-      "passes": false
+      "passes": true
     }
 ]
   
