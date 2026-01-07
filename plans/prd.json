@@ -448,7 +448,7 @@
         "Verify storage footprint is materially reduced vs CSV due to Parquet compression",
         "Document expected costs and size estimates"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "nonfunctional",

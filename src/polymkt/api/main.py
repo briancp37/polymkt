@@ -38,9 +38,13 @@ from polymkt.models.schemas import (
     HybridIndexStats,
     HybridSearchResult,
     MarketSearchResult,
+    CompressionRatioSchema,
+    CostEfficiencyReportSchema,
+    InfrastructureRequirementsSchema,
     PerformanceBenchmarkReportSchema,
     PerformanceBenchmarkRequest,
     QueryBenchmarkResultSchema,
+    StorageFootprintSchema,
     RangeIssueSchema,
     ReferentialIntegrityIssueSchema,
     RunRecord,
@@ -71,6 +75,7 @@ from polymkt.signals.favorites import (
 from polymkt.backtest.engine import BacktestEngine
 from polymkt.storage.data_quality import DataQualityChecker
 from polymkt.storage.performance import PerformanceBenchmarker
+from polymkt.storage.cost_efficiency import CostEfficiencyAnalyzer
 
 app = FastAPI(
     title="Polymkt Analytics API",
@@ -2407,3 +2412,72 @@ def run_performance_benchmark(
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to run benchmark: {e}")
+
+
+# =============================================================================
+# Cost efficiency endpoints
+# =============================================================================
+
+
+@app.post("/api/cost-efficiency/analyze", response_model=CostEfficiencyReportSchema)
+def analyze_cost_efficiency() -> CostEfficiencyReportSchema:
+    """
+    Analyze cost efficiency of the storage system.
+
+    Verifies that:
+    - Local dev is fully functional using filesystem Parquet + DuckDB + SQLite
+    - No managed database server is required for core workflows
+    - Storage footprint is reduced vs CSV due to Parquet compression
+    - Estimates monthly costs if data were stored on S3
+
+    Returns a detailed report with storage footprints, compression ratios,
+    infrastructure requirements, and cost estimates.
+    """
+    try:
+        analyzer = CostEfficiencyAnalyzer(
+            data_dir=settings.data_dir,
+            parquet_dir=settings.parquet_dir,
+            duckdb_path=settings.duckdb_path,
+            metadata_db_path=settings.metadata_db_path,
+            csv_dir=settings.data_dir,
+        )
+
+        report = analyzer.run_analysis()
+
+        return CostEfficiencyReportSchema(
+            report_id=report.report_id,
+            created_at=report.created_at,
+            storage_footprints=[
+                StorageFootprintSchema(
+                    path=sf.path,
+                    size_bytes=sf.size_bytes,
+                    size_mb=round(sf.size_mb, 2),
+                    file_count=sf.file_count,
+                    format=sf.format,
+                )
+                for sf in report.storage_footprints
+            ],
+            compression_ratios=[
+                CompressionRatioSchema(
+                    original_format=cr.original_format,
+                    compressed_format=cr.compressed_format,
+                    original_size_bytes=cr.original_size_bytes,
+                    compressed_size_bytes=cr.compressed_size_bytes,
+                    ratio=round(cr.ratio, 2),
+                    savings_percent=round(cr.savings_percent, 1),
+                )
+                for cr in report.compression_ratios
+            ],
+            infrastructure=InfrastructureRequirementsSchema(
+                requires_managed_db=report.infrastructure.requires_managed_db,
+                requires_external_services=report.infrastructure.requires_external_services,
+                local_only_services=report.infrastructure.local_only_services,
+                storage_backends=report.infrastructure.storage_backends,
+                notes=report.infrastructure.notes,
+            ),
+            estimated_monthly_cost_usd=report.estimated_monthly_cost_usd,
+            notes=report.notes,
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to analyze cost efficiency: {e}")

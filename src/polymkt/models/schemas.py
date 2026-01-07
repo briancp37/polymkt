@@ -749,3 +749,65 @@ class PerformanceBenchmarkListResponse(BaseModel):
         ..., description="List of benchmark reports"
     )
     count: int = Field(..., description="Number of reports in this response")
+
+
+# =============================================================================
+# Cost efficiency schemas for infrastructure and storage analysis
+# =============================================================================
+
+
+class StorageFootprintSchema(BaseModel):
+    """Storage footprint for a file or directory."""
+
+    path: str = Field(..., description="Path to the file or directory")
+    size_bytes: int = Field(..., description="Size in bytes")
+    size_mb: float = Field(..., description="Size in megabytes")
+    file_count: int = Field(..., description="Number of files")
+    format: str = Field(..., description="Storage format (csv, parquet, sqlite, duckdb)")
+
+
+class CompressionRatioSchema(BaseModel):
+    """Compression ratio between storage formats."""
+
+    original_format: str = Field(..., description="Original format (e.g., csv)")
+    compressed_format: str = Field(..., description="Compressed format (e.g., parquet)")
+    original_size_bytes: int = Field(..., description="Original size in bytes")
+    compressed_size_bytes: int = Field(..., description="Compressed size in bytes")
+    ratio: float = Field(..., description="Compression ratio (original / compressed)")
+    savings_percent: float = Field(..., description="Storage savings percentage")
+
+
+class InfrastructureRequirementsSchema(BaseModel):
+    """Infrastructure requirements for the current setup."""
+
+    requires_managed_db: bool = Field(False, description="Whether a managed DB is required")
+    requires_external_services: list[str] = Field(
+        default_factory=list, description="External services required"
+    )
+    local_only_services: list[str] = Field(
+        default_factory=list, description="Services that run locally"
+    )
+    storage_backends: list[str] = Field(
+        default_factory=list, description="Storage backends used"
+    )
+    notes: list[str] = Field(default_factory=list, description="Additional notes")
+
+
+class CostEfficiencyReportSchema(BaseModel):
+    """Complete cost efficiency report."""
+
+    report_id: str = Field(..., description="Unique report identifier")
+    created_at: datetime = Field(..., description="When the analysis was run")
+    storage_footprints: list[StorageFootprintSchema] = Field(
+        default_factory=list, description="Storage footprints for all files"
+    )
+    compression_ratios: list[CompressionRatioSchema] = Field(
+        default_factory=list, description="Compression ratios between formats"
+    )
+    infrastructure: InfrastructureRequirementsSchema = Field(
+        ..., description="Infrastructure requirements"
+    )
+    estimated_monthly_cost_usd: float = Field(
+        ..., description="Estimated monthly cost in USD if on S3"
+    )
+    notes: list[str] = Field(default_factory=list, description="Analysis notes")
