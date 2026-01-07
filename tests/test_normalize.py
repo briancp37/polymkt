@@ -566,5 +566,7 @@ def test_bootstrap_without_validation(temp_dir: Path) -> None:
     assert summary.markets_rows == 1
     assert summary.trades_rows == 1
     assert summary.order_filled_rows == 1
-    # No quarantine stats when validation is disabled
-    assert summary.rows_quarantined == {}
+    # No quarantine stats when validation is disabled (except events which was not found)
+    assert summary.rows_quarantined.get("markets", 0) == 0
+    assert summary.rows_quarantined.get("trades", 0) == 0
+    assert summary.rows_quarantined.get("order_filled", 0) == 0

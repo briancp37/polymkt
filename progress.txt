@@ -511,3 +511,99 @@ Implemented the incremental update pipeline using watermark-based filtering to f
 - Implement election group concept for "buy the favorite" backtests
 - Implement backtest v1: buy favorite at 90 days to expiry
 - Implement datasets and backtests persistence
+
+---
+
+## 2026-01-06: Events Bootstrap and Schema Validation Feature
+
+### What was done:
+Implemented the events bootstrap pipeline and schema validation feature that loads events with tags from CSV and joins them to markets, preserving custom columns (category, closedTime) and deriving markets.tags from events.
+
+### Features implemented:
+1. **Events CSV processing** (`src/polymkt/pipeline/bootstrap.py:120-182`)
+   - `_read_events_csv()` parses events CSV with JSON-encoded tags list
+   - Handles various tag formats: JSON array, comma-separated, single value
+   - Creates events Parquet with event_id, tags (list<string>), title, description, created_at
+
+2. **Events-to-markets tag join** (`src/polymkt/pipeline/bootstrap.py:184-277`)
+   - `_join_events_tags_to_markets()` uses DuckDB in-memory join
+   - Left join ensures markets without events get empty tags []
+   - Logs warning for markets with event_id but no matching event
+
+3. **Schema validation with actionable errors** (`src/polymkt/pipeline/bootstrap.py:279-362`)
+   - `SchemaValidationError` exception with missing_fields and invalid_fields details
+   - `validate_schema_requirements()` validates:
+     - Required markets fields (id, question)
+     - Required events fields if provided (event_id, tags)
+     - Join key (event_id) in markets when events are required
+   - Fails fast with clear error messages for remediation
+
+4. **Bootstrap integration** (`src/polymkt/pipeline/bootstrap.py:364-636`)
+   - Added `events_csv` and `require_events_for_tags` parameters
+   - Events processed before markets to enable tag join
+   - Events validation, normalization, and Parquet write
+   - Schema validation before market-events join
+   - Preserves category and closedTime on markets
+
+5. **DuckDB views for events** (`src/polymkt/storage/duckdb_layer.py:29-118`)
+   - Added `v_events` view with event_id, tags, title, description, created_at
+   - Updated `v_markets` to include event_id and tags columns
+   - Updated `v_trades_with_markets` to include tags
+   - Optional events view creation (gracefully skips if no events.parquet)
+
+6. **Parquet events schema** (`src/polymkt/storage/parquet.py:15-21`)
+   - `EVENTS_SCHEMA` with tags as list<string> type
+   - `write_events()` method in `ParquetWriter`
+
+7. **BootstrapSummary updated** (`src/polymkt/models/schemas.py:95-109`)
+   - Added `events_rows` field for event row count
+
+### PRD requirements met:
+- Load data/markets.csv with category and closedTime present ✓
+- Run events bootstrap that loads event_id and tags into events table ✓
+- Join events.tags onto markets via event_id to produce markets.tags ✓
+- Run bootstrap import into storage layer ✓
+- Verify updated market rows contain category, closedTime, and derived tags ✓
+- Verify schema validation fails fast with actionable errors ✓
+
+### Tests added (`tests/test_events_schema.py`):
+160 tests passing (20 new tests for events/schema feature).
+
+**TestReadEventsCSV (3 tests):**
+- `test_read_events_csv_parses_tags`: Verifies events CSV is read with tags parsed
+- `test_read_events_csv_tags_are_lists`: Verifies tags are list of strings
+- `test_read_events_csv_empty_tags`: Verifies empty tags handled as []
+
+**TestJoinEventsToMarkets (2 tests):**
+- `test_join_events_tags_to_markets`: Verifies tags joined correctly
+- `test_join_events_to_markets_no_match`: Verifies unmatched markets get []
+
+**TestSchemaValidation (6 tests):**
+- `test_validate_schema_requirements_passes`: Valid schema passes
+- `test_validate_schema_requires_market_id`: Missing id fails
+- `test_validate_schema_requires_market_question`: Missing question fails
+- `test_validate_schema_requires_event_id_for_tags_join`: Missing event_id fails when required
+- `test_validate_schema_requires_events_table_for_tags`: Missing events table fails when required
+- `test_validate_schema_requires_events_tags_column`: Missing tags column fails
+
+**TestBootstrapWithEvents (6 tests):**
+- `test_bootstrap_with_events_creates_events_parquet`: Events Parquet created
+- `test_bootstrap_with_events_joins_tags_to_markets`: Tags joined to markets
+- `test_bootstrap_preserves_category_and_closed_time`: Custom columns preserved
+- `test_bootstrap_sets_events_watermark`: Watermark set for events
+- `test_bootstrap_without_events_works`: Backward compatible without events
+- `test_bootstrap_fails_when_events_required_but_missing`: Fails when required but missing
+
+**TestDuckDBEventsView (3 tests):**
+- `test_duckdb_creates_events_view`: v_events view created
+- `test_duckdb_markets_view_includes_tags`: v_markets includes tags
+- `test_duckdb_trades_with_markets_includes_tags`: v_trades_with_markets includes tags
+
+### PRD features marked as passing:
+- Schema validation includes custom markets columns (category, closedTime) and tags derived from events
+
+### Next steps for future sessions:
+- Implement the search indices (BM25 + vector search)
+- Implement election group concept for "buy the favorite" backtests
+- Implement backtest v1: buy favorite at 90 days to expiry
+- Implement datasets and backtests persistence

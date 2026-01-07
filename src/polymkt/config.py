@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     markets_csv: Path = Path("data/markets.csv")
     trades_csv: Path = Path("data/trades.csv")
     order_filled_csv: Path = Path("data/orderFilled.csv")
+    events_csv: Path = Path("data/events.csv")
 
     # Parquet settings
     parquet_compression: str = "zstd"

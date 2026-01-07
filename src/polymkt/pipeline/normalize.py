@@ -423,6 +423,99 @@ def validate_and_normalize_markets(
     return result
 
 
+def validate_and_normalize_events(
+    table: pa.Table,
+) -> ValidationResult:
+    """
+    Validate and normalize events data.
+
+    Performs:
+    - Required field validation (event_id)
+    - Tags validation (must be a list of strings if present)
+    - Timestamp validation for created_at
+
+    Args:
+        table: PyArrow table of events data
+
+    Returns:
+        ValidationResult with valid table and quarantined rows
+    """
+    result = ValidationResult(
+        valid_table=table,
+        rows_processed=table.num_rows,
+    )
+
+    if table.num_rows == 0:
+        result.rows_valid = 0
+        return result
+
+    rows = table.to_pylist()
+    valid_rows: list[dict[str, Any]] = []
+
+    for row_idx, row in enumerate(rows):
+        row_errors: list[str] = []
+
+        # Validate required field: event_id
+        if not _check_required_field(row, "event_id", row_errors):
+            result.quarantined_rows.append(
+                {"row_index": row_idx, "row": row, "errors": row_errors}
+            )
+            result.error_messages.extend(
+                [f"Row {row_idx}: {e}" for e in row_errors]
+            )
+            continue
+
+        # Normalize timestamp if present
+        created_at = normalize_timestamp(row.get("created_at"), "created_at")
+
+        # Validate tags (should be a list of strings or None)
+        tags = row.get("tags")
+        if tags is not None:
+            if not isinstance(tags, list):
+                row_errors.append(f"Invalid tags: expected list, got {type(tags).__name__}")
+                result.quarantined_rows.append(
+                    {"row_index": row_idx, "row": row, "errors": row_errors}
+                )
+                result.error_messages.extend(
+                    [f"Row {row_idx}: {e}" for e in row_errors]
+                )
+                continue
+            # Ensure all items are strings
+            tags = [str(t) if t is not None else "" for t in tags]
+
+        # Build normalized row
+        normalized_row = dict(row)
+        normalized_row["created_at"] = created_at
+        normalized_row["tags"] = tags if tags is not None else []
+
+        valid_rows.append(normalized_row)
+
+    # Build result table from valid rows
+    if valid_rows:
+        result.valid_table = pa.Table.from_pylist(valid_rows, schema=table.schema)
+    else:
+        result.valid_table = table.slice(0, 0)
+
+    result.rows_valid = len(valid_rows)
+    result.rows_quarantined = len(result.quarantined_rows)
+
+    logger.info(
+        "events_validation_complete",
+        rows_processed=result.rows_processed,
+        rows_valid=result.rows_valid,
+        rows_quarantined=result.rows_quarantined,
+    )
+
+    if result.rows_quarantined > 0:
+        logger.warning(
+            "events_rows_quarantined",
+            count=result.rows_quarantined,
+            sample_errors=result.error_messages[:5],
+        )
+
+    return result
+
+
 def validate_and_normalize_order_filled(
     table: pa.Table,
     normalize_addresses: bool = True,

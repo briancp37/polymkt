@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.csv as csv
@@ -13,6 +14,7 @@ from polymkt.config import settings
 from polymkt.models.schemas import BootstrapSummary, RunRecord
 from polymkt.pipeline.normalize import (
     ValidationResult,
+    validate_and_normalize_events,
     validate_and_normalize_markets,
     validate_and_normalize_order_filled,
     validate_and_normalize_trades,
@@ -20,6 +22,7 @@ from polymkt.pipeline.normalize import (
 from polymkt.storage.duckdb_layer import DuckDBLayer
 from polymkt.storage.metadata import MetadataStore
 from polymkt.storage.parquet import (
+    EVENTS_SCHEMA,
     MARKETS_SCHEMA,
     ORDER_FILLED_SCHEMA,
     TRADES_SCHEMA,
@@ -29,9 +32,15 @@ from polymkt.storage.parquet import (
 logger = structlog.get_logger()
 
 # Column mappings from CSV to our internal schema
+EVENTS_COLUMN_MAPPING = {
+    "eventId": "event_id",
+    "createdAt": "created_at",
+}
+
 MARKETS_COLUMN_MAPPING = {
     "createdAt": "created_at",
     "closedTime": "closed_time",
+    "eventId": "event_id",
 }
 
 TRADES_COLUMN_MAPPING = {
@@ -109,10 +118,242 @@ def _read_csv_with_schema(
     return pa.table(dict(zip([f.name for f in target_schema], columns)), schema=target_schema)
 
 
+def _read_events_csv(csv_path: Path) -> pa.Table:
+    """
+    Read events CSV with special handling for tags column (JSON list).
+
+    Events CSV format expected:
+    eventId,tags,title,description,createdAt
+    evt_123,"[""tag1"",""tag2""]",My Event,Description,2025-01-01 00:00:00
+    """
+    import json
+
+    logger.info("reading_events_csv", path=str(csv_path))
+
+    # Read CSV as strings first
+    table = csv.read_csv(csv_path)
+    logger.info(
+        "events_csv_read",
+        path=str(csv_path),
+        rows=table.num_rows,
+        columns=table.column_names,
+    )
+
+    # Rename columns
+    table = _rename_columns(table, EVENTS_COLUMN_MAPPING)
+
+    rows = table.to_pylist()
+    processed_rows: list[dict[str, Any]] = []
+
+    for row in rows:
+        processed_row = dict(row)
+
+        # Parse tags from JSON string if present
+        tags_value = row.get("tags")
+        if tags_value is None or tags_value == "":
+            processed_row["tags"] = []
+        elif isinstance(tags_value, str):
+            try:
+                parsed_tags = json.loads(tags_value)
+                if isinstance(parsed_tags, list):
+                    processed_row["tags"] = [str(t) for t in parsed_tags]
+                else:
+                    processed_row["tags"] = [str(parsed_tags)]
+            except json.JSONDecodeError:
+                # If not valid JSON, treat as a single tag or comma-separated
+                if "," in tags_value:
+                    processed_row["tags"] = [t.strip() for t in tags_value.split(",")]
+                else:
+                    processed_row["tags"] = [tags_value]
+        elif isinstance(tags_value, list):
+            processed_row["tags"] = [str(t) for t in tags_value]
+        else:
+            processed_row["tags"] = []
+
+        # Parse created_at timestamp
+        from polymkt.pipeline.normalize import normalize_timestamp
+        processed_row["created_at"] = normalize_timestamp(
+            row.get("created_at"), "created_at"
+        )
+
+        processed_rows.append(processed_row)
+
+    # Build PyArrow table with proper schema
+    return pa.Table.from_pylist(processed_rows, schema=EVENTS_SCHEMA)
+
+
+def _join_events_tags_to_markets(
+    markets_table: pa.Table,
+    events_table: pa.Table,
+) -> pa.Table:
+    """
+    Join event tags to markets via event_id.
+
+    This enriches markets with tags from their parent events.
+
+    Args:
+        markets_table: Markets table with event_id column
+        events_table: Events table with event_id and tags columns
+
+    Returns:
+        Markets table with tags populated from events join
+    """
+    import duckdb
+
+    logger.info(
+        "joining_events_to_markets",
+        markets_rows=markets_table.num_rows,
+        events_rows=events_table.num_rows,
+    )
+
+    # Use DuckDB in-memory for efficient join
+    conn = duckdb.connect(":memory:")
+
+    # Register tables
+    conn.register("markets", markets_table)
+    conn.register("events", events_table)
+
+    # Left join markets to events to get tags
+    # Markets without an event_id or with no matching event get NULL tags
+    result = conn.execute("""
+        SELECT
+            m.id,
+            m.question,
+            m.created_at,
+            m.answer1,
+            m.answer2,
+            m.neg_risk,
+            m.market_slug,
+            m.token1,
+            m.token2,
+            m.condition_id,
+            m.volume,
+            m.ticker,
+            m.closed_time,
+            m.description,
+            m.category,
+            m.event_id,
+            COALESCE(e.tags, []) AS tags
+        FROM markets m
+        LEFT JOIN events e ON m.event_id = e.event_id
+    """).fetch_arrow_table()
+
+    # Log unmapped markets (those with event_id but no matching event)
+    unmapped_result = conn.execute("""
+        SELECT COUNT(*) as cnt FROM markets m
+        WHERE m.event_id IS NOT NULL
+        AND m.event_id NOT IN (SELECT event_id FROM events)
+    """).fetchone()
+    unmapped_count: int = int(unmapped_result[0]) if unmapped_result else 0
+
+    if unmapped_count > 0:
+        logger.warning(
+            "markets_with_unmapped_events",
+            unmapped_count=unmapped_count,
+            message=f"{unmapped_count} markets have event_id but no matching event in events table",
+        )
+
+    conn.close()
+
+    logger.info(
+        "events_join_complete",
+        output_rows=result.num_rows,
+        unmapped_markets=unmapped_count,
+    )
+
+    return result
+
+
+class SchemaValidationError(Exception):
+    """Raised when schema validation fails with actionable error information."""
+
+    def __init__(self, message: str, missing_fields: list[str] | None = None,
+                 invalid_fields: dict[str, str] | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.missing_fields = missing_fields or []
+        self.invalid_fields = invalid_fields or {}
+
+
+def validate_schema_requirements(
+    markets_table: pa.Table | None = None,
+    events_table: pa.Table | None = None,
+    require_events_for_tags: bool = False,
+) -> None:
+    """
+    Validate schema requirements and fail fast with actionable errors.
+
+    Checks:
+    - Required fields are present in markets (id, question)
+    - Required fields are present in events if provided (event_id)
+    - Join key (event_id) exists if events table is provided
+
+    Args:
+        markets_table: Markets table to validate
+        events_table: Events table to validate (optional)
+        require_events_for_tags: If True, require events table for tags derivation
+
+    Raises:
+        SchemaValidationError: If validation fails with details about what's wrong
+    """
+    errors: list[str] = []
+    missing_fields: list[str] = []
+    invalid_fields: dict[str, str] = {}
+
+    if markets_table is not None:
+        market_columns = set(markets_table.column_names)
+
+        # Check required market fields
+        required_market_fields = ["id", "question"]
+        for field in required_market_fields:
+            if field not in market_columns:
+                missing_fields.append(f"markets.{field}")
+                errors.append(f"Missing required field in markets: {field}")
+
+        # Check that event_id exists if we want to join events
+        if require_events_for_tags and "event_id" not in market_columns:
+            missing_fields.append("markets.event_id")
+            errors.append(
+                "markets.event_id is required for joining event tags. "
+                "Add event_id column to markets.csv or set require_events_for_tags=False"
+            )
+
+    if events_table is not None:
+        event_columns = set(events_table.column_names)
+
+        # Check required event fields
+        if "event_id" not in event_columns:
+            missing_fields.append("events.event_id")
+            errors.append("Missing required field in events: event_id")
+
+        if "tags" not in event_columns:
+            missing_fields.append("events.tags")
+            errors.append("Missing required field in events: tags")
+
+    if require_events_for_tags and events_table is None:
+        errors.append(
+            "Events table is required for deriving market tags. "
+            "Provide events.csv or set require_events_for_tags=False"
+        )
+
+    if errors:
+        error_message = "Schema validation failed:\n" + "\n".join(f"  - {e}" for e in errors)
+        logger.error(
+            "schema_validation_failed",
+            errors=errors,
+            missing_fields=missing_fields,
+            invalid_fields=invalid_fields,
+        )
+        raise SchemaValidationError(error_message, missing_fields, invalid_fields)
+
+    logger.info("schema_validation_passed")
+
+
 def run_bootstrap(
     markets_csv: Path | None = None,
     trades_csv: Path | None = None,
     order_filled_csv: Path | None = None,
+    events_csv: Path | None = None,
     parquet_dir: Path | None = None,
     duckdb_path: Path | None = None,
     metadata_db_path: Path | None = None,
@@ -120,6 +361,7 @@ def run_bootstrap(
     validate_data: bool = True,
     partitioning_enabled: bool | None = None,
     hash_bucket_count: int | None = None,
+    require_events_for_tags: bool = False,
 ) -> BootstrapSummary:
     """
     Run the bootstrap import process.
@@ -131,6 +373,7 @@ def run_bootstrap(
         markets_csv: Path to markets CSV file
         trades_csv: Path to trades CSV file
         order_filled_csv: Path to orderFilled CSV file
+        events_csv: Path to events CSV file (for deriving market tags)
         parquet_dir: Directory for Parquet output
         duckdb_path: Path to DuckDB database file
         metadata_db_path: Path to metadata SQLite database
@@ -138,6 +381,7 @@ def run_bootstrap(
         validate_data: Whether to validate and quarantine invalid rows
         partitioning_enabled: Whether to partition trades Parquet by year/month/day/hash_bucket
         hash_bucket_count: Number of hash buckets for market_id partitioning
+        require_events_for_tags: If True, require events CSV for deriving market tags
 
     Returns:
         BootstrapSummary with run details including any validation issues
@@ -146,6 +390,7 @@ def run_bootstrap(
     markets_csv = markets_csv or settings.markets_csv
     trades_csv = trades_csv or settings.trades_csv
     order_filled_csv = order_filled_csv or settings.order_filled_csv
+    events_csv = events_csv or settings.events_csv
     parquet_dir = parquet_dir or settings.parquet_dir
     duckdb_path = duckdb_path or settings.duckdb_path
     metadata_db_path = metadata_db_path or settings.metadata_db_path
@@ -185,6 +430,34 @@ def run_bootstrap(
     validation_results: dict[str, ValidationResult] = {}
 
     try:
+        # Process events first (needed for market tags join)
+        events_table: pa.Table | None = None
+        if events_csv.exists():
+            logger.info("processing_events", path=str(events_csv))
+            events_table = _read_events_csv(events_csv)
+            rows_read["events"] = events_table.num_rows
+
+            if validate_data:
+                events_validation = validate_and_normalize_events(events_table)
+                validation_results["events"] = events_validation
+                events_table = events_validation.valid_table
+                rows_quarantined["events"] = events_validation.rows_quarantined
+
+            output_path = parquet_writer.write_events(events_table)
+            rows_written["events"] = events_table.num_rows
+            parquet_files.append(str(output_path))
+        else:
+            if require_events_for_tags:
+                raise SchemaValidationError(
+                    f"Events CSV not found at {events_csv}. "
+                    "Events are required for deriving market tags. "
+                    "Either provide events.csv or set require_events_for_tags=False"
+                )
+            logger.info("events_csv_not_found", path=str(events_csv))
+            rows_read["events"] = 0
+            rows_written["events"] = 0
+            rows_quarantined["events"] = 0
+
         # Process markets
         if markets_csv.exists():
             logger.info("processing_markets", path=str(markets_csv))
@@ -198,6 +471,18 @@ def run_bootstrap(
                 validation_results["markets"] = markets_validation
                 markets_table = markets_validation.valid_table
                 rows_quarantined["markets"] = markets_validation.rows_quarantined
+
+            # Validate schema requirements
+            validate_schema_requirements(
+                markets_table=markets_table,
+                events_table=events_table,
+                require_events_for_tags=require_events_for_tags,
+            )
+
+            # Join events tags to markets if events are available
+            if events_table is not None and events_table.num_rows > 0:
+                logger.info("joining_events_tags_to_markets")
+                markets_table = _join_events_tags_to_markets(markets_table, events_table)
 
             output_path = parquet_writer.write_markets(markets_table)
             rows_written["markets"] = markets_table.num_rows
@@ -291,6 +576,8 @@ def run_bootstrap(
             metadata_store.set_watermark(
                 "order_filled", {"bootstrap_completed": end_time.isoformat()}
             )
+        if rows_written.get("events", 0) > 0:
+            metadata_store.set_watermark("events", {"bootstrap_completed": end_time.isoformat()})
 
         # Log quarantine summary if any rows were quarantined
         total_quarantined = sum(rows_quarantined.values())
@@ -318,6 +605,7 @@ def run_bootstrap(
             markets_rows=rows_written.get("markets", 0),
             trades_rows=rows_written.get("trades", 0),
             order_filled_rows=rows_written.get("order_filled", 0),
+            events_rows=rows_written.get("events", 0),
             schema_version="1.0.0",
             parquet_files=parquet_files,
             rows_quarantined=rows_quarantined,

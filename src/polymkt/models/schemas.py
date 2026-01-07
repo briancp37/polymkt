@@ -6,6 +6,18 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class EventSchema(BaseModel):
+    """Schema for event data (parent entity for related markets)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    event_id: str = Field(..., alias="eventId", description="Event ID")
+    tags: list[str] = Field(default_factory=list, description="Event tags/categories")
+    title: str | None = Field(None, description="Event title")
+    description: str | None = Field(None, description="Event description")
+    created_at: datetime | None = Field(None, alias="createdAt", description="Event creation time")
+
+
 class MarketSchema(BaseModel):
     """Schema for market data."""
 
@@ -26,6 +38,8 @@ class MarketSchema(BaseModel):
     closed_time: datetime | None = Field(None, alias="closedTime", description="Market closure time")
     description: str | None = Field(None, description="Market description")
     category: str | None = Field(None, description="Market category")
+    event_id: str | None = Field(None, alias="eventId", description="Parent event ID for grouping")
+    tags: list[str] | None = Field(None, description="Tags derived from event")
 
 
 class TradeSchema(BaseModel):
@@ -87,6 +101,7 @@ class BootstrapSummary(BaseModel):
     markets_rows: int
     trades_rows: int
     order_filled_rows: int
+    events_rows: int = Field(default=0, description="Number of event rows processed")
     schema_version: str
     parquet_files: list[str]
     rows_quarantined: dict[str, int] = Field(

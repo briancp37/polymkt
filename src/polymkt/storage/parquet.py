@@ -12,6 +12,14 @@ import structlog
 logger = structlog.get_logger()
 
 # Schema definitions for each entity
+EVENTS_SCHEMA = pa.schema([
+    ("event_id", pa.string()),
+    ("tags", pa.list_(pa.string())),
+    ("title", pa.string()),
+    ("description", pa.string()),
+    ("created_at", pa.timestamp("us", tz="UTC")),
+])
+
 MARKETS_SCHEMA = pa.schema([
     ("id", pa.string()),
     ("question", pa.string()),
@@ -28,6 +36,8 @@ MARKETS_SCHEMA = pa.schema([
     ("closed_time", pa.timestamp("us", tz="UTC")),
     ("description", pa.string()),
     ("category", pa.string()),
+    ("event_id", pa.string()),
+    ("tags", pa.list_(pa.string())),
 ])
 
 TRADES_SCHEMA = pa.schema([
@@ -130,6 +140,24 @@ class ParquetWriter:
         self.partitioning_enabled = partitioning_enabled
         self.hash_bucket_count = hash_bucket_count
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def write_events(self, table: pa.Table) -> Path:
+        """Write events data to Parquet."""
+        output_path = self.output_dir / "events.parquet"
+        table = table.cast(EVENTS_SCHEMA)
+        pq.write_table(
+            table,
+            output_path,
+            compression=self.compression,
+            row_group_size=self.row_group_size,
+        )
+        logger.info(
+            "parquet_written",
+            entity="events",
+            path=str(output_path),
+            rows=table.num_rows,
+        )
+        return output_path
 
     def write_markets(self, table: pa.Table) -> Path:
         """Write markets data to Parquet."""

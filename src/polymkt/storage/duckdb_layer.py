@@ -27,6 +27,16 @@ def get_view_definitions(parquet_dir: str, partitioned: bool = False) -> dict[st
         trades_source = f"read_parquet('{parquet_dir}/trades.parquet')"
 
     return {
+        "v_events": f"""
+            CREATE OR REPLACE VIEW v_events AS
+            SELECT
+                event_id,
+                tags,
+                title,
+                description,
+                created_at
+            FROM read_parquet('{parquet_dir}/events.parquet')
+        """,
         "v_markets": f"""
             CREATE OR REPLACE VIEW v_markets AS
             SELECT
@@ -44,7 +54,9 @@ def get_view_definitions(parquet_dir: str, partitioned: bool = False) -> dict[st
                 ticker,
                 closed_time,
                 description,
-                category
+                category,
+                event_id,
+                tags
             FROM read_parquet('{parquet_dir}/markets.parquet')
         """,
         "v_trades": f"""
@@ -93,6 +105,7 @@ def get_view_definitions(parquet_dir: str, partitioned: bool = False) -> dict[st
                 m.question,
                 m.category,
                 m.closed_time,
+                m.tags,
                 -- Derived field: days to expiry
                 CASE
                     WHEN m.closed_time IS NOT NULL
@@ -134,6 +147,16 @@ def get_layered_view_definitions(
 
     return {
         # Raw layer views (immutable, no derived fields)
+        "v_events_raw": f"""
+            CREATE OR REPLACE VIEW v_events_raw AS
+            SELECT
+                event_id,
+                tags,
+                title,
+                description,
+                created_at
+            FROM read_parquet('{raw_dir}/events.parquet')
+        """,
         "v_markets_raw": f"""
             CREATE OR REPLACE VIEW v_markets_raw AS
             SELECT
@@ -151,7 +174,9 @@ def get_layered_view_definitions(
                 ticker,
                 closed_time,
                 description,
-                category
+                category,
+                event_id,
+                tags
             FROM read_parquet('{raw_dir}/markets.parquet')
         """,
         "v_trades_raw": f"""
@@ -219,11 +244,16 @@ def get_layered_view_definitions(
                 t.days_to_exp,
                 m.question,
                 m.category,
-                m.closed_time
+                m.closed_time,
+                m.tags
             FROM v_trades_analytics t
             LEFT JOIN v_markets_raw m ON t.market_id = m.id
         """,
         # Alias views for backward compatibility
+        "v_events": f"""
+            CREATE OR REPLACE VIEW v_events AS
+            SELECT * FROM v_events_raw
+        """,
         "v_markets": f"""
             CREATE OR REPLACE VIEW v_markets AS
             SELECT * FROM v_markets_raw
@@ -309,9 +339,26 @@ class DuckDBLayer:
             view_definitions = get_view_definitions(parquet_dir_str, self.partitioned)
 
         for view_name, view_sql in view_definitions.items():
-            self.conn.execute(view_sql)
-            created_views.append(view_name)
-            logger.info("view_created", view=view_name, partitioned=self.partitioned)
+            try:
+                self.conn.execute(view_sql)
+                created_views.append(view_name)
+                logger.info("view_created", view=view_name, partitioned=self.partitioned)
+            except Exception as e:
+                error_str = str(e)
+                # Events view is optional - continue if parquet file doesn't exist
+                # or if v_events_raw doesn't exist (for alias views)
+                is_events_view = "events" in view_name.lower()
+                is_missing_file = "No files found" in error_str
+                is_missing_base_view = "v_events_raw does not exist" in error_str
+
+                if is_events_view and (is_missing_file or is_missing_base_view):
+                    logger.info(
+                        "view_skipped_no_parquet",
+                        view=view_name,
+                        reason="events.parquet not found",
+                    )
+                else:
+                    raise
 
         return created_views
 
@@ -322,22 +369,29 @@ class DuckDBLayer:
         if self.layered:
             # Layered mode has more views
             view_names = [
+                "v_events_raw",
                 "v_markets_raw",
                 "v_trades_raw",
                 "v_order_filled_raw",
                 "v_trades_analytics",
                 "v_trades_with_markets",
+                "v_events",
                 "v_markets",
                 "v_trades",
                 "v_order_filled",
             ]
         else:
-            view_names = ["v_markets", "v_trades", "v_order_filled", "v_trades_with_markets"]
+            view_names = ["v_events", "v_markets", "v_trades", "v_order_filled", "v_trades_with_markets"]
 
         for view_name in view_names:
-            result = self.conn.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()
-            counts[view_name] = result[0] if result else 0
-            logger.info("view_verified", view=view_name, rows=counts[view_name])
+            try:
+                result = self.conn.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()
+                counts[view_name] = result[0] if result else 0
+                logger.info("view_verified", view=view_name, rows=counts[view_name])
+            except Exception as e:
+                # View may not exist if corresponding parquet file doesn't exist
+                logger.warning("view_not_available", view=view_name, error=str(e))
+                counts[view_name] = 0
         return counts
 
     def execute(self, sql: str, params: list[Any] | None = None) -> duckdb.DuckDBPyConnection:

@@ -23,7 +23,7 @@
           "Verify updated market rows still contain category, closedTime, and derived tags populated",
           "Verify schema validation fails fast with actionable errors if required fields are missing or join keys are absent"
         ],
-        "passes": false
+        "passes": true
     },
     {
       "category": "functional",
