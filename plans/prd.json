@@ -145,7 +145,7 @@
         "Verify backend uses predicate pushdown / partition pruning where applicable",
         "Verify response size controls are enforced (limit/streaming/export)"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "functional",

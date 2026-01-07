@@ -140,9 +140,58 @@ Implemented the complete query interface for filtering trades by market_id and t
 ### PRD features marked as passing:
 - Query interface: filter by a single market_id and time range
 
+---
+
+## 2026-01-06: Query Interface for 100+ Market IDs Feature
+
+### What was done:
+Implemented efficient querying for multiple market_ids (100+), enabling research workflows that need to analyze trades across many markets simultaneously.
+
+### Features implemented:
+1. **Multiple market_ids query support** (`src/polymkt/storage/duckdb_layer.py:142-238`)
+   - `market_ids` parameter accepts a list of market IDs
+   - Uses SQL `IN` clause with parameterized queries (safe from SQL injection)
+   - `market_id` (single) takes precedence over `market_ids` (multiple) if both provided
+   - Combined with time range filters and pagination
+
+2. **API endpoint support** (`src/polymkt/api/main.py`)
+   - `TradesQueryRequest.market_ids: list[str] | None` parameter added
+   - Works with existing pagination (limit/offset) and ordering
+   - Response size controls enforced via limit parameter
+
+3. **DuckDB predicate pushdown verification**
+   - Query plan analysis shows filter operations are applied efficiently
+   - DuckDB optimizes `IN` clause filtering against Parquet files
+
+### Tests added (`tests/test_query_interface.py`, `tests/test_api.py`):
+78 tests passing (14 new tests for multiple market_ids).
+
+**TestQueryMultipleMarketIds (6 tests):**
+- `test_filter_by_two_market_ids`: Basic multi-market query
+- `test_filter_by_subset_market_ids`: Verify only requested markets returned
+- `test_filter_by_nonexistent_market_ids`: Empty result handling
+- `test_multiple_market_ids_with_time_range`: Combined filters
+- `test_multiple_market_ids_with_pagination`: Pagination with multi-market
+- `test_single_market_id_parameter_takes_precedence`: Precedence rule
+
+**TestQuery100PlusMarketIds (5 tests):**
+- `test_query_100_plus_market_ids`: 110 market_ids query (330 trades)
+- `test_query_100_plus_market_ids_with_time_filter`: Combined time+market filter
+- `test_query_100_plus_market_ids_pagination`: Pagination with 100 markets
+- `test_query_150_market_ids`: Full dataset query (450 trades)
+- `test_query_plan_uses_filter_pushdown`: EXPLAIN ANALYZE verification
+
+**TestQueryTradesAPI (3 tests):**
+- `test_query_multiple_market_ids`: API endpoint test
+- `test_query_multiple_market_ids_with_pagination`: API pagination test
+- `test_query_single_market_id_precedence`: API precedence test
+
+### PRD features marked as passing:
+- Query interface: filter by many market_ids (100+), efficiently
+
 ### Next steps for future sessions:
-- Implement query interface for 100+ market_ids efficiently (predicate pushdown)
 - Implement schema validation for custom columns (category, closedTime, tags) - events join
 - Implement incremental updates with watermark-based fetching
 - Add Parquet partitioning for query optimization
 - Implement the search indices (BM25 + vector search)
+- Add derived field days_to_exp
