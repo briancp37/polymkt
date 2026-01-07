@@ -210,3 +210,29 @@ class HybridIndexStats(BaseModel):
     semantic_markets_indexed: int | None = Field(None, description="Markets in semantic index")
     semantic_embedding_model: str | None = Field(None, description="Embedding model used")
     semantic_embedding_dim: int | None = Field(None, description="Embedding dimensions")
+
+
+class SearchIndexUpdateResult(BaseModel):
+    """Result of an incremental search index update."""
+
+    status: str = Field(..., description="Status of the update (success, no_changes)")
+    mode: str = Field(..., description="Update mode (incremental, full_rebuild, specific)")
+    bm25_updated: int = Field(0, description="Number of markets updated in BM25 index")
+    semantic_updated: int = Field(0, description="Number of markets updated in semantic index")
+    new_markets: int = Field(0, description="Number of new markets detected")
+    changed_markets: int = Field(0, description="Number of changed markets detected")
+    deleted_markets: int = Field(0, description="Number of deleted markets detected")
+
+
+class SearchIndexUpdaterStats(BaseModel):
+    """Statistics about the search index updater."""
+
+    total_hashes: int = Field(0, description="Total content hashes tracked")
+    first_updated: datetime | None = Field(None, description="First hash update time")
+    last_updated: datetime | None = Field(None, description="Last hash update time")
+    bm25_available: bool = Field(..., description="Whether BM25 index is available")
+    semantic_available: bool = Field(..., description="Whether semantic index is available")
+    bm25_markets_indexed: int | None = Field(None, description="Markets in BM25 index")
+    semantic_markets_indexed: int | None = Field(None, description="Markets in semantic index")
+    semantic_embedding_model: str | None = Field(None, description="Embedding model used")
+    semantic_embedding_dim: int | None = Field(None, description="Embedding dimensions")

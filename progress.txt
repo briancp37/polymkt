@@ -915,3 +915,86 @@ Implemented hybrid market search that combines BM25 full-text search and semanti
 - Implement election group concept for "buy the favorite" backtests
 - Implement backtest v1: buy favorite at 90 days to expiry
 - Implement datasets and backtests persistence
+
+---
+
+## 2026-01-07: Incremental Search Index Updates Feature
+
+### What was done:
+Implemented incremental search index updates that detect changed markets and update only the affected markets in both BM25 and semantic indices, avoiding full index rebuilds.
+
+### Features implemented:
+1. **Content hash-based change detection** (`src/polymkt/storage/search_index_updater.py`)
+   - `compute_market_content_hash()` - Computes MD5 hash of question+tags+description
+   - `market_content_hashes` table stores hashes keyed by market_id
+   - `detect_changed_markets()` - Identifies new, changed, and deleted markets by comparing hashes
+
+2. **SearchIndexUpdater class** (`src/polymkt/storage/search_index_updater.py`)
+   - Manages incremental updates to both BM25 and semantic search indices
+   - `update_indices()` - Main method for incremental or full rebuild updates
+   - `update_specific_markets()` - Updates specific market IDs (useful when update pipeline knows which changed)
+   - `get_stats()` - Returns statistics about hash tracking and index state
+   - Gracefully handles missing OpenAI API key (BM25-only mode)
+
+3. **API endpoints** (`src/polymkt/api/main.py`)
+   - `POST /api/search-index/update` - Incremental update or force rebuild
+     - Query param: `force_rebuild=true` for full rebuild
+     - Detects changed markets via content hashing
+     - Updates only affected markets in indices
+   - `GET /api/search-index/stats` - Get updater statistics
+
+4. **Schema models** (`src/polymkt/models/schemas.py`)
+   - `SearchIndexUpdateResult` - Response for update operation
+   - `SearchIndexUpdaterStats` - Statistics about the updater
+
+### PRD requirements met:
+- Run an incremental update that adds/modifies markets rows ✓
+- Detect which market rows changed (by hash of question+tags+description) ✓
+- Regenerate embeddings only for changed/new markets ✓
+- Verify BM25 and vector indices reflect the changes ✓
+
+### Tests added (`tests/test_incremental_search_update.py`):
+265 tests total (23 new tests for incremental search update feature).
+
+**TestComputeMarketContentHash (7 tests):**
+- `test_hash_with_all_fields`: Hash computation with all fields
+- `test_hash_deterministic`: Deterministic hash for same input
+- `test_hash_different_for_different_question`: Hash changes on question change
+- `test_hash_different_for_different_tags`: Hash changes on tags change
+- `test_hash_different_for_different_description`: Hash changes on description change
+- `test_hash_with_none_fields`: Handles None fields
+- `test_hash_tags_order_independent`: Tags sorted for consistent hash
+
+**TestSearchIndexUpdater (9 tests):**
+- `test_init_creates_hash_table`: Hash table creation on init
+- `test_detect_new_markets`: Detection of new markets
+- `test_detect_changed_markets`: Detection of changed markets
+- `test_update_indices_full_rebuild`: Force rebuild functionality
+- `test_update_indices_incremental_no_changes`: No-op when no changes
+- `test_update_indices_incremental_with_changes`: Incremental update
+- `test_update_specific_markets`: Update specific market IDs
+- `test_update_specific_markets_empty_list`: Empty list handling
+- `test_get_stats`: Statistics retrieval
+
+**TestSearchIndexUpdaterWithNewMarkets (2 tests):**
+- `test_detect_new_markets_after_add`: Detect newly added markets
+- `test_incremental_update_adds_new_market`: New markets become searchable
+
+**TestSearchIndexUpdaterAPI (4 tests):**
+- `test_api_update_search_indices_force_rebuild`: Force rebuild endpoint
+- `test_api_update_search_indices_incremental`: Incremental update endpoint
+- `test_api_get_search_index_stats`: Stats endpoint
+- `test_api_update_requires_bootstrap`: Bootstrap required check
+
+**TestIncrementalSearchUpdateWithEvents (1 test):**
+- `test_detect_change_from_tags_update`: Tag changes trigger index update
+
+### PRD features marked as passing:
+- Incremental updates: new/changed markets update the search indices without full rebuild
+
+### Next steps for future sessions:
+- Implement Markets Search API endpoint with snippets/highlights
+- Implement election group concept for "buy the favorite" backtests
+- Implement backtest v1: buy favorite at 90 days to expiry
+- Implement datasets and backtests persistence
+- Implement poly_data integration for live updates

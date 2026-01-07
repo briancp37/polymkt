@@ -14,6 +14,8 @@ from polymkt.models.schemas import (
     HybridSearchResult,
     MarketSearchResult,
     RunRecord,
+    SearchIndexUpdateResult,
+    SearchIndexUpdaterStats,
     SemanticSearchResult,
     UpdateSummary,
 )
@@ -25,6 +27,7 @@ from polymkt.storage.metadata import MetadataStore
 from polymkt.storage.search import MarketSearchIndex
 from polymkt.storage.hybrid_search import HybridSearchIndex
 from polymkt.storage.semantic_search import SemanticSearchIndex
+from polymkt.storage.search_index_updater import SearchIndexUpdater
 
 app = FastAPI(
     title="Polymkt Analytics API",
@@ -827,5 +830,118 @@ def get_hybrid_search_stats() -> HybridIndexStats:
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get hybrid search stats: {e}")
+    finally:
+        duckdb_layer.close()
+
+
+@app.post("/api/search-index/update", response_model=SearchIndexUpdateResult)
+def update_search_indices(
+    force_rebuild: bool = False,
+) -> SearchIndexUpdateResult:
+    """
+    Update search indices incrementally based on changed markets.
+
+    This endpoint detects which markets have changed (new, modified, or deleted)
+    by comparing content hashes of question + tags + description, and updates
+    only the affected markets in both BM25 and semantic indices.
+
+    This is more efficient than rebuilding the entire index when only a few
+    markets have changed.
+
+    Args:
+        force_rebuild: If True, rebuild all indices from scratch instead of
+                      doing an incremental update. Use this if the indices
+                      are corrupted or out of sync.
+
+    Returns:
+        Update statistics including number of markets updated in each index.
+    """
+    if not (settings.parquet_dir / "markets.parquet").exists():
+        raise HTTPException(
+            status_code=400,
+            detail="Markets data not available. Run bootstrap first.",
+        )
+
+    duckdb_layer = DuckDBLayer(settings.duckdb_path, settings.parquet_dir)
+    try:
+        duckdb_layer.create_views()
+
+        updater = SearchIndexUpdater(
+            conn=duckdb_layer.conn,
+            openai_api_key=settings.openai_api_key,
+            embedding_model=settings.openai_embedding_model,
+            embedding_dimensions=settings.openai_embedding_dimensions,
+        )
+
+        result = updater.update_indices(force_rebuild=force_rebuild)
+
+        # Normalize field names (force_rebuild returns bm25_indexed, incremental returns bm25_updated)
+        bm25_count = result.get("bm25_updated", 0) or result.get("bm25_indexed", 0)
+        semantic_count = result.get("semantic_updated", 0) or result.get("semantic_indexed", 0)
+
+        # Determine status based on results
+        total_updated = bm25_count + semantic_count
+        if result["mode"] == "full_rebuild":
+            status = "success"
+        elif total_updated > 0:
+            status = "success"
+        else:
+            status = "no_changes"
+
+        return SearchIndexUpdateResult(
+            status=status,
+            mode=result["mode"],
+            bm25_updated=bm25_count,
+            semantic_updated=semantic_count,
+            new_markets=result.get("new_markets", 0),
+            changed_markets=result.get("changed_markets", 0),
+            deleted_markets=result.get("deleted_markets", 0),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update search indices: {e}")
+    finally:
+        duckdb_layer.close()
+
+
+@app.get("/api/search-index/stats", response_model=SearchIndexUpdaterStats)
+def get_search_index_updater_stats() -> SearchIndexUpdaterStats:
+    """
+    Get statistics about the search index updater.
+
+    Returns information about content hash tracking and both BM25 and semantic
+    search indices.
+    """
+    if not (settings.parquet_dir / "markets.parquet").exists():
+        raise HTTPException(
+            status_code=400,
+            detail="Markets data not available. Run bootstrap first.",
+        )
+
+    duckdb_layer = DuckDBLayer(settings.duckdb_path, settings.parquet_dir)
+    try:
+        duckdb_layer.create_views()
+
+        updater = SearchIndexUpdater(
+            conn=duckdb_layer.conn,
+            openai_api_key=settings.openai_api_key,
+            embedding_model=settings.openai_embedding_model,
+            embedding_dimensions=settings.openai_embedding_dimensions,
+        )
+
+        stats = updater.get_stats()
+
+        return SearchIndexUpdaterStats(
+            total_hashes=stats.get("total_hashes", 0),
+            first_updated=stats.get("first_updated"),
+            last_updated=stats.get("last_updated"),
+            bm25_available=stats.get("bm25_available", False),
+            semantic_available=stats.get("semantic_available", False),
+            bm25_markets_indexed=stats.get("bm25_markets_indexed"),
+            semantic_markets_indexed=stats.get("semantic_markets_indexed"),
+            semantic_embedding_model=stats.get("semantic_embedding_model"),
+            semantic_embedding_dim=stats.get("semantic_embedding_dim"),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get search index stats: {e}")
     finally:
         duckdb_layer.close()
