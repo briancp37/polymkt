@@ -607,3 +607,106 @@ Implemented the events bootstrap pipeline and schema validation feature that loa
 - Implement election group concept for "buy the favorite" backtests
 - Implement backtest v1: buy favorite at 90 days to expiry
 - Implement datasets and backtests persistence
+
+---
+
+## 2026-01-06: BM25 Searchable Markets Index Feature
+
+### What was done:
+Implemented the BM25 full-text search index for markets using DuckDB's FTS extension, enabling keyword search over market.question, market.tags (derived from events), and market.description.
+
+### Features implemented:
+1. **Search index module** (`src/polymkt/storage/search.py`)
+   - `MarketSearchIndex` class manages BM25 search using DuckDB FTS extension
+   - `create_search_table()` materializes markets with flattened tags (list→text) for indexing
+   - `create_fts_index()` creates FTS index using Porter stemmer, English stopwords
+   - `build_index()` combines table creation and FTS index in one call
+   - `search()` performs BM25 search with filtering and pagination
+   - `refresh_index()` and `update_markets()` for index maintenance
+
+2. **Search query with deduplication**
+   - FTS returns multiple matches per document (one per indexed field)
+   - Fixed with GROUP BY + MAX(score) to return one result per market
+   - Added secondary sort by market ID for stable pagination
+
+3. **Search filtering and pagination**
+   - Filter by `category`, `closed_time_min`, `closed_time_max`
+   - Pagination with `limit` and `offset` parameters
+   - Returns `total_count` for pagination UI ("Results 1-50 of 234")
+
+4. **API endpoints** (`src/polymkt/api/main.py`)
+   - `POST /api/search/build` - Build/rebuild the search index
+   - `GET /api/markets/search` - Search with query params:
+     - `q` (required): Search query string
+     - `limit`, `offset`: Pagination (default 50, 0)
+     - `category`: Filter by category
+     - `closed_time_min`, `closed_time_max`: Date range filters
+
+5. **Response model** (`src/polymkt/models/schemas.py`)
+   - `MarketSearchResult`: id, question, tags, category, closed_time, event_id, score
+
+### PRD requirements met:
+- Load markets metadata into DuckDB with question available ✓
+- Ensure markets.tags is derived by joining to events ✓ (from events bootstrap)
+- Flatten tags list into searchable text field ✓ (tags_text column)
+- Enable DuckDB FTS extension and build index over question, tags_text, description ✓
+- Run search query for common keyword ✓
+- Results returned with relevance score and sorted by relevance ✓
+
+### Tests added (`tests/test_search.py`):
+190 tests passing (30 new tests for search feature).
+
+**TestSearchIndexCreation (4 tests):**
+- `test_create_search_table`: Verifies table structure with tags_text
+- `test_create_fts_index`: Verifies FTS index created
+- `test_build_index_creates_table_and_fts`: Integration test
+- `test_tags_flattened_to_searchable_text`: Tags→text conversion
+
+**TestBasicSearch (6 tests):**
+- `test_search_by_keyword_in_question`: Keyword search in question field
+- `test_search_by_keyword_in_tags`: Keyword search in tags
+- `test_search_by_keyword_in_description`: Keyword search in description
+- `test_search_returns_relevance_score`: BM25 scores returned
+- `test_search_results_sorted_by_relevance`: Descending score order
+- `test_search_returns_market_metadata`: All fields present
+
+**TestSearchFiltering (5 tests):**
+- `test_filter_by_category`: Category filter works
+- `test_filter_by_closed_time_min`: Min date filter
+- `test_filter_by_closed_time_max`: Max date filter
+- `test_filter_by_closed_time_range`: Date range filter
+- `test_combined_category_and_time_filter`: Combined filters
+
+**TestSearchPagination (4 tests):**
+- `test_pagination_limit`: Limit parameter works
+- `test_pagination_offset`: Offset parameter works
+- `test_total_count_for_pagination_ui`: Total count returned
+- `test_stable_ordering_across_pages`: Deterministic pagination
+
+**TestSearchIndexMaintenance (3 tests):**
+- `test_refresh_index_rebuilds_completely`: Full rebuild works
+- `test_update_markets_updates_specific_rows`: Incremental update
+- `test_update_markets_with_empty_list`: Edge case handling
+
+**TestSearchEdgeCases (4 tests):**
+- `test_search_without_building_index_raises_error`: Error handling
+- `test_search_with_no_matches`: Empty results
+- `test_search_with_empty_query`: Empty query handling
+- `test_search_with_special_characters`: Special char handling
+
+**TestSearchAPIIntegration (4 tests):**
+- `test_api_search_endpoint`: API returns results
+- `test_api_search_with_filters`: API filtering works
+- `test_api_search_pagination`: API pagination works
+- `test_api_build_search_index`: Build endpoint works
+
+### PRD features marked as passing:
+- Create a searchable Markets index (BM25) over market.question and event-derived market.tags for keyword search
+
+### Next steps for future sessions:
+- Implement semantic search index (OpenAI embeddings) for markets
+- Implement hybrid search (combine BM25 and embedding results)
+- Implement incremental search index updates
+- Implement Markets Search API endpoint with snippets/highlights
+- Implement election group concept for "buy the favorite" backtests
+- Implement backtest v1: buy favorite at 90 days to expiry

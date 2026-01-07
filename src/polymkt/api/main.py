@@ -6,12 +6,19 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from polymkt.config import settings
-from polymkt.models.schemas import BootstrapSummary, CurateSummary, RunRecord, UpdateSummary
+from polymkt.models.schemas import (
+    BootstrapSummary,
+    CurateSummary,
+    MarketSearchResult,
+    RunRecord,
+    UpdateSummary,
+)
 from polymkt.pipeline.bootstrap import run_bootstrap
 from polymkt.pipeline.curate import run_curate
 from polymkt.pipeline.update import run_update
 from polymkt.storage.duckdb_layer import DuckDBLayer
 from polymkt.storage.metadata import MetadataStore
+from polymkt.storage.search import MarketSearchIndex
 
 app = FastAPI(
     title="Polymkt Analytics API",
@@ -68,6 +75,33 @@ class TradesQueryResponse(BaseModel):
     count: int
     total_count: int
     has_more: bool
+
+
+class MarketSearchRequest(BaseModel):
+    """Request for searching markets."""
+
+    q: str
+    limit: int = 50
+    offset: int = 0
+    category: str | None = None
+    closed_time_min: str | None = None
+    closed_time_max: str | None = None
+
+
+class MarketSearchResponse(BaseModel):
+    """Response for market search."""
+
+    results: list[MarketSearchResult]
+    count: int
+    total_count: int
+    has_more: bool
+
+
+class BuildSearchIndexResponse(BaseModel):
+    """Response for building search index."""
+
+    status: str
+    markets_indexed: int
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -213,6 +247,125 @@ def get_watermarks() -> dict[str, Any]:
     """Get all current watermarks."""
     metadata_store = MetadataStore(settings.metadata_db_path)
     return metadata_store.get_all_watermarks()
+
+
+@app.post("/api/search/build", response_model=BuildSearchIndexResponse)
+def build_search_index() -> BuildSearchIndexResponse:
+    """
+    Build or rebuild the BM25 full-text search index for markets.
+
+    This creates a searchable index over market.question, market.tags
+    (derived from events), and market.description.
+
+    The index uses DuckDB's FTS extension with BM25 scoring for relevance ranking.
+    """
+    # Check if Parquet files exist
+    if not (settings.parquet_dir / "markets.parquet").exists():
+        raise HTTPException(
+            status_code=400,
+            detail="Markets data not available. Run bootstrap first.",
+        )
+
+    duckdb_layer = DuckDBLayer(settings.duckdb_path, settings.parquet_dir)
+    try:
+        # Ensure views exist
+        duckdb_layer.create_views()
+
+        # Build the search index
+        search_index = MarketSearchIndex(duckdb_layer.conn)
+        markets_indexed = search_index.build_index()
+
+        return BuildSearchIndexResponse(
+            status="success",
+            markets_indexed=markets_indexed,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to build search index: {e}")
+    finally:
+        duckdb_layer.close()
+
+
+@app.get("/api/markets/search", response_model=MarketSearchResponse)
+def search_markets(
+    q: str,
+    limit: int = 50,
+    offset: int = 0,
+    category: str | None = None,
+    closed_time_min: str | None = None,
+    closed_time_max: str | None = None,
+) -> MarketSearchResponse:
+    """
+    Search markets using BM25 full-text search.
+
+    This endpoint searches over market.question, market.tags (derived from events),
+    and market.description using DuckDB's FTS extension.
+
+    Results are sorted by relevance score (BM25) by default.
+
+    Args:
+        q: Search query string (required)
+        limit: Maximum results to return (default 50)
+        offset: Number of results to skip for pagination (default 0)
+        category: Filter by market category (optional)
+        closed_time_min: Filter by minimum closed_time (optional)
+        closed_time_max: Filter by maximum closed_time (optional)
+
+    Returns:
+        Paginated search results with relevance scores
+    """
+    # Check if Parquet files exist
+    if not (settings.parquet_dir / "markets.parquet").exists():
+        raise HTTPException(
+            status_code=400,
+            detail="Markets data not available. Run bootstrap first.",
+        )
+
+    duckdb_layer = DuckDBLayer(settings.duckdb_path, settings.parquet_dir)
+    try:
+        # Ensure views exist
+        duckdb_layer.create_views()
+
+        # Create search index and build it
+        search_index = MarketSearchIndex(duckdb_layer.conn)
+        search_index.build_index()
+
+        # Perform the search
+        results_raw, total_count = search_index.search(
+            query=q,
+            limit=limit,
+            offset=offset,
+            category=category,
+            closed_time_min=closed_time_min,
+            closed_time_max=closed_time_max,
+        )
+
+        # Convert to response model
+        results = [
+            MarketSearchResult(
+                id=r["id"],
+                question=r["question"],
+                tags=r["tags"] if r["tags"] else None,
+                category=r["category"],
+                closed_time=r["closed_time"],
+                event_id=r["event_id"],
+                score=r["score"],
+            )
+            for r in results_raw
+        ]
+
+        has_more = (offset + len(results)) < total_count
+        return MarketSearchResponse(
+            results=results,
+            count=len(results),
+            total_count=total_count,
+            has_more=has_more,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Search failed: {e}")
+    finally:
+        duckdb_layer.close()
 
 
 @app.post("/api/query/trades_with_markets", response_model=TradesQueryResponse)

@@ -147,3 +147,15 @@ class UpdateSummary(BaseModel):
     watermark_after: dict[str, Any] = Field(
         default_factory=dict, description="Watermarks after the update"
     )
+
+
+class MarketSearchResult(BaseModel):
+    """A single market search result."""
+
+    id: str = Field(..., description="Market ID")
+    question: str = Field(..., description="Market question")
+    tags: list[str] | None = Field(None, description="Market tags derived from event")
+    category: str | None = Field(None, description="Market category")
+    closed_time: datetime | None = Field(None, description="Market close time")
+    event_id: str | None = Field(None, description="Parent event ID")
+    score: float = Field(..., description="BM25 relevance score")

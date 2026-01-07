@@ -291,7 +291,7 @@
           "Run a search query for a common keyword (e.g., 'election')",
           "Verify results are returned with a relevance score and are sorted by relevance by default"
         ],
-        "passes": false
+        "passes": true
     },
     {
         "category": "functional",
