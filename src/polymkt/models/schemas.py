@@ -338,3 +338,120 @@ class DatasetListResponse(BaseModel):
     count: int = Field(..., description="Number of datasets in this response")
     total_count: int = Field(..., description="Total number of datasets")
     has_more: bool = Field(..., description="Whether more datasets exist")
+
+
+# =============================================================================
+# Backtest schemas for persisting backtest runs and results
+# =============================================================================
+
+
+class StrategyConfig(BaseModel):
+    """Configuration for a backtest strategy."""
+
+    name: str = Field(..., description="Strategy name (e.g., 'buy_favorite')")
+    entry_days_to_exp: float | None = Field(
+        None, description="Days to expiry for entry signal (e.g., 90)"
+    )
+    exit_rule: str | None = Field(
+        None, description="Exit rule (e.g., 'expiry', 'stop_loss', 'take_profit')"
+    )
+    favorite_rule: str | None = Field(
+        None, description="Rule for determining favorite (e.g., 'max_yes_price')"
+    )
+    fee_rate: float = Field(0.0, description="Fee rate (0.0 to 1.0)")
+    slippage_rate: float = Field(0.0, description="Slippage rate (0.0 to 1.0)")
+    position_size: float = Field(1.0, description="Position size as fraction of capital (0.0 to 1.0)")
+    extra_params: dict[str, Any] | None = Field(None, description="Additional strategy parameters")
+
+
+class BacktestMetrics(BaseModel):
+    """Summary metrics for a backtest run."""
+
+    total_return: float | None = Field(None, description="Total return as percentage")
+    total_pnl: float | None = Field(None, description="Total profit/loss in USD")
+    win_rate: float | None = Field(None, description="Win rate (0.0 to 1.0)")
+    trade_count: int | None = Field(None, description="Total number of trades")
+    winning_trades: int | None = Field(None, description="Number of winning trades")
+    losing_trades: int | None = Field(None, description="Number of losing trades")
+    max_drawdown: float | None = Field(None, description="Maximum drawdown as percentage")
+    sharpe_ratio: float | None = Field(None, description="Sharpe ratio")
+    avg_trade_pnl: float | None = Field(None, description="Average PnL per trade")
+    avg_holding_period_days: float | None = Field(None, description="Average holding period in days")
+
+
+class BacktestTradeRecord(BaseModel):
+    """Record of a single trade in a backtest."""
+
+    market_id: str = Field(..., description="Market ID")
+    election_group_id: str | None = Field(None, description="Election group ID if applicable")
+    entry_time: datetime = Field(..., description="Entry timestamp")
+    entry_price: float = Field(..., description="Entry price")
+    exit_time: datetime | None = Field(None, description="Exit timestamp")
+    exit_price: float | None = Field(None, description="Exit price")
+    position_size: float = Field(..., description="Position size")
+    pnl: float | None = Field(None, description="Profit/loss for this trade")
+    fees_paid: float | None = Field(None, description="Fees paid for this trade")
+    slippage_cost: float | None = Field(None, description="Slippage cost for this trade")
+
+
+class BacktestSchema(BaseModel):
+    """Schema for a saved backtest run."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str = Field(..., description="Backtest ID (UUID)")
+    dataset_id: str = Field(..., description="Dataset ID this backtest ran on")
+    strategy_config: StrategyConfig = Field(..., description="Strategy configuration used")
+    status: str = Field(
+        "pending", description="Backtest status (pending, running, completed, failed)"
+    )
+    metrics: BacktestMetrics | None = Field(None, description="Summary metrics (null if not completed)")
+    trades: list[BacktestTradeRecord] | None = Field(
+        None, description="Trade records (null if not completed)"
+    )
+    equity_curve: list[dict[str, Any]] | None = Field(
+        None, description="Equity curve data points (null if not completed)"
+    )
+    error_message: str | None = Field(None, description="Error message if failed")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+    completed_at: datetime | None = Field(None, description="Completion timestamp")
+
+
+class BacktestCreateRequest(BaseModel):
+    """Request to create a new backtest."""
+
+    dataset_id: str = Field(..., description="Dataset ID to run backtest on")
+    strategy_config: StrategyConfig = Field(..., description="Strategy configuration")
+
+
+class BacktestUpdateRequest(BaseModel):
+    """Request to update a backtest (e.g., mark as completed with results)."""
+
+    status: str | None = Field(None, description="Backtest status")
+    metrics: BacktestMetrics | None = Field(None, description="Summary metrics")
+    trades: list[BacktestTradeRecord] | None = Field(None, description="Trade records")
+    equity_curve: list[dict[str, Any]] | None = Field(None, description="Equity curve data points")
+    error_message: str | None = Field(None, description="Error message if failed")
+
+
+class BacktestSummary(BaseModel):
+    """Summary of a backtest for list views."""
+
+    id: str = Field(..., description="Backtest ID")
+    dataset_id: str = Field(..., description="Dataset ID")
+    strategy_name: str = Field(..., description="Strategy name from config")
+    status: str = Field(..., description="Backtest status")
+    total_return: float | None = Field(None, description="Total return percentage")
+    trade_count: int | None = Field(None, description="Number of trades")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    completed_at: datetime | None = Field(None, description="Completion timestamp")
+
+
+class BacktestListResponse(BaseModel):
+    """Response for listing backtests."""
+
+    backtests: list[BacktestSummary] = Field(..., description="List of backtest summaries")
+    count: int = Field(..., description="Number of backtests in this response")
+    total_count: int = Field(..., description="Total number of backtests")
+    has_more: bool = Field(..., description="Whether more backtests exist")

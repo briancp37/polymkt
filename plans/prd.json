@@ -229,7 +229,7 @@
         "Rerun backtest with a modified parameter (e.g., horizon)",
         "Verify both runs remain available and comparable"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "functional",

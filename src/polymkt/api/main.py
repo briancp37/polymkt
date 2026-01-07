@@ -7,6 +7,11 @@ from pydantic import BaseModel
 
 from polymkt.config import settings
 from polymkt.models.schemas import (
+    BacktestCreateRequest,
+    BacktestListResponse,
+    BacktestSchema,
+    BacktestSummary,
+    BacktestUpdateRequest,
     BootstrapSummary,
     CurateSummary,
     DatasetCreateRequest,
@@ -28,6 +33,7 @@ from polymkt.models.schemas import (
 from polymkt.pipeline.bootstrap import run_bootstrap
 from polymkt.pipeline.curate import run_curate
 from polymkt.pipeline.update import run_update
+from polymkt.storage.backtests import BacktestNotFoundError, BacktestStore
 from polymkt.storage.datasets import DatasetNotFoundError, DatasetStore
 from polymkt.storage.duckdb_layer import DuckDBLayer
 from polymkt.storage.metadata import MetadataStore
@@ -1226,3 +1232,142 @@ def delete_dataset(dataset_id: str) -> dict[str, str]:
         raise HTTPException(status_code=404, detail=f"Dataset not found: {dataset_id}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete dataset: {e}")
+
+
+# =============================================================================
+# Backtest CRUD endpoints for persisting backtest runs and results
+# =============================================================================
+
+
+@app.post("/api/backtests", response_model=BacktestSchema, status_code=201)
+def create_backtest(request: BacktestCreateRequest) -> BacktestSchema:
+    """
+    Create a new backtest for a dataset with a strategy configuration.
+
+    A backtest represents a strategy execution on a dataset. The backtest
+    starts in 'pending' status and can be updated with results once execution
+    completes.
+
+    Args:
+        request: Backtest creation request with dataset_id and strategy_config
+
+    Returns:
+        The created backtest with generated ID and timestamps
+    """
+    try:
+        backtest_store = BacktestStore(settings.metadata_db_path)
+        return backtest_store.create_backtest(request)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create backtest: {e}")
+
+
+@app.get("/api/backtests", response_model=BacktestListResponse)
+def list_backtests(
+    limit: int = 50,
+    offset: int = 0,
+    dataset_id: str | None = None,
+) -> BacktestListResponse:
+    """
+    List backtests with pagination.
+
+    Returns backtest summaries ordered by most recently created first.
+    Optionally filter by dataset_id to see all backtests for a specific dataset.
+
+    Args:
+        limit: Maximum number of backtests to return (default 50)
+        offset: Number of backtests to skip for pagination (default 0)
+        dataset_id: Optional dataset ID to filter by
+
+    Returns:
+        Paginated list of backtest summaries with total_count and has_more
+    """
+    try:
+        backtest_store = BacktestStore(settings.metadata_db_path)
+        summaries, total_count = backtest_store.list_backtests(
+            limit=limit, offset=offset, dataset_id=dataset_id
+        )
+        has_more = (offset + len(summaries)) < total_count
+        return BacktestListResponse(
+            backtests=summaries,
+            count=len(summaries),
+            total_count=total_count,
+            has_more=has_more,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to list backtests: {e}")
+
+
+@app.get("/api/backtests/{backtest_id}", response_model=BacktestSchema)
+def get_backtest(backtest_id: str) -> BacktestSchema:
+    """
+    Get a backtest by ID.
+
+    Returns the full backtest including strategy config, metrics, trades,
+    and equity curve (if completed).
+
+    Args:
+        backtest_id: The backtest UUID
+
+    Returns:
+        The backtest with all fields
+    """
+    try:
+        backtest_store = BacktestStore(settings.metadata_db_path)
+        return backtest_store.get_backtest(backtest_id)
+    except BacktestNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Backtest not found: {backtest_id}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get backtest: {e}")
+
+
+@app.put("/api/backtests/{backtest_id}", response_model=BacktestSchema)
+def update_backtest(backtest_id: str, request: BacktestUpdateRequest) -> BacktestSchema:
+    """
+    Update an existing backtest.
+
+    Use this endpoint to:
+    - Update status (pending -> running -> completed/failed)
+    - Add metrics after execution
+    - Add trade records
+    - Add equity curve data
+    - Add error message if failed
+
+    Only provided fields are updated; omitted fields retain their existing values.
+
+    Args:
+        backtest_id: The backtest UUID
+        request: Fields to update (only provided fields are modified)
+
+    Returns:
+        The updated backtest
+    """
+    try:
+        backtest_store = BacktestStore(settings.metadata_db_path)
+        return backtest_store.update_backtest(backtest_id, request)
+    except BacktestNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Backtest not found: {backtest_id}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update backtest: {e}")
+
+
+@app.delete("/api/backtests/{backtest_id}")
+def delete_backtest(backtest_id: str) -> dict[str, str]:
+    """
+    Delete a backtest.
+
+    This permanently removes the backtest and all its results.
+
+    Args:
+        backtest_id: The backtest UUID
+
+    Returns:
+        Confirmation message
+    """
+    try:
+        backtest_store = BacktestStore(settings.metadata_db_path)
+        backtest_store.delete_backtest(backtest_id)
+        return {"status": "deleted", "backtest_id": backtest_id}
+    except BacktestNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Backtest not found: {backtest_id}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete backtest: {e}")

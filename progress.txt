@@ -1281,3 +1281,116 @@ Implemented the Datasets persistence feature that allows users to save, list, up
 - Implement poly_data integration for live updates
 - Implement Dataset Agent (natural language filters)
 - Implement Backtesting Agent (natural language strategy requests)
+
+---
+
+## 2026-01-07: Backtests Persistence Feature
+
+### What was done:
+Implemented the Backtests persistence feature that allows users to save, list, update, and delete backtest runs with strategy configurations and results for review and comparison.
+
+### Features implemented:
+1. **Backtest schema models** (`src/polymkt/models/schemas.py:343-457`)
+   - `StrategyConfig` - Strategy configuration (name, entry_days_to_exp, exit_rule, favorite_rule, fees, slippage, position_size, extra_params)
+   - `BacktestMetrics` - Summary metrics (total_return, total_pnl, win_rate, trade_count, max_drawdown, sharpe_ratio, etc.)
+   - `BacktestTradeRecord` - Individual trade records with entry/exit times, prices, PnL, fees
+   - `BacktestSchema` - Full backtest with id, dataset_id, strategy_config, status, metrics, trades, equity_curve, timestamps
+   - `BacktestCreateRequest` - Request to create a new backtest
+   - `BacktestUpdateRequest` - Request for partial updates (status, metrics, trades, etc.)
+   - `BacktestSummary` - Summary for list views with key metrics
+   - `BacktestListResponse` - Paginated list response
+
+2. **BacktestStore class** (`src/polymkt/storage/backtests.py`)
+   - SQLite-backed storage for backtests in the metadata database
+   - `create_backtest()` - Creates a new backtest with generated UUID and timestamps
+   - `get_backtest()` - Retrieves a backtest by ID, raises BacktestNotFoundError if not found
+   - `update_backtest()` - Partial update of backtest fields, sets completed_at when status becomes "completed"
+   - `delete_backtest()` - Removes a backtest
+   - `list_backtests()` - Paginated listing with optional dataset_id filter, ordered by created_at DESC
+   - Proper JSON serialization of strategy_config, metrics, trades, and equity_curve
+
+3. **API endpoints** (`src/polymkt/api/main.py:1237-1373`)
+   - `POST /api/backtests` - Create a new backtest (returns 201)
+   - `GET /api/backtests` - List backtests with pagination (limit, offset) and optional dataset_id filter
+   - `GET /api/backtests/{backtest_id}` - Get a backtest by ID
+   - `PUT /api/backtests/{backtest_id}` - Update a backtest (partial update supported)
+   - `DELETE /api/backtests/{backtest_id}` - Delete a backtest
+
+### PRD requirements met:
+- Run a backtest on a dataset ✓ (create endpoint)
+- Persist backtest record (id, dataset_id, strategy config, created_at, summary metrics) ✓
+- List backtests and open a backtest detail view ✓ (list and get endpoints)
+- Rerun backtest with a modified parameter ✓ (create new backtest with different config)
+- Verify both runs remain available and comparable ✓ (list by dataset_id)
+
+### Tests added (`tests/test_backtests.py`):
+389 tests total (41 new tests for backtests feature).
+
+**TestBacktestStoreCreation (2 tests):**
+- `test_init_creates_table`: Table creation verification
+- `test_init_creates_parent_dirs`: Directory creation
+
+**TestBacktestCreate (4 tests):**
+- `test_create_backtest_basic`: Basic backtest creation
+- `test_create_backtest_with_fees_and_slippage`: Strategy with costs
+- `test_create_backtest_with_extra_params`: Custom parameters
+- `test_create_multiple_backtests`: Multiple backtests
+
+**TestBacktestGet (3 tests):**
+- `test_get_backtest_by_id`: Get by ID
+- `test_get_nonexistent_backtest_raises`: 404 handling
+- `test_get_backtest_with_results`: Completed backtest retrieval
+
+**TestBacktestUpdate (7 tests):**
+- `test_update_backtest_status`: Update status only
+- `test_update_backtest_with_metrics`: Add metrics
+- `test_update_backtest_with_trades`: Add trade records
+- `test_update_backtest_sets_completed_at`: Completion timestamp
+- `test_update_backtest_with_error`: Failed backtest with error
+- `test_update_nonexistent_backtest_raises`: 404 handling
+- `test_update_preserves_created_at`: Timestamp preservation
+
+**TestBacktestDelete (3 tests):**
+- `test_delete_backtest`: Delete functionality
+- `test_delete_nonexistent_backtest_raises`: 404 handling
+- `test_delete_updates_count`: Count verification
+
+**TestBacktestList (7 tests):**
+- `test_list_empty`: Empty list
+- `test_list_returns_summaries`: Summary format
+- `test_list_with_completed_backtest`: Metrics in summary
+- `test_list_pagination_limit`: Limit parameter
+- `test_list_pagination_offset`: Offset parameter
+- `test_list_ordered_by_created_at`: Ordering
+- `test_list_filter_by_dataset_id`: Dataset filter
+
+**TestBacktestsAPICreate (3 tests):**
+- API endpoint tests for create with validation
+
+**TestBacktestsAPIList (3 tests):**
+- API endpoint tests for list with pagination and filtering
+
+**TestBacktestsAPIGet (2 tests):**
+- API endpoint tests for get by ID
+
+**TestBacktestsAPIUpdate (3 tests):**
+- API endpoint tests for update (status, full results)
+
+**TestBacktestsAPIDelete (2 tests):**
+- API endpoint tests for delete
+
+**TestBacktestsIntegration (2 tests):**
+- `test_full_crud_workflow`: Complete CRUD workflow test
+- `test_multiple_backtests_for_same_dataset`: Multiple backtests on same dataset
+
+### PRD features marked as passing:
+- Persist 'Backtests' so users can review prior results and rerun with modifications
+
+### Next steps for future sessions:
+- Implement election group concept for "buy the favorite" backtests
+- Implement favorite definition at 90-days snapshot
+- Implement backtest v1: buy favorite at 90 days to expiry
+- Implement backtest assumptions (fees/slippage in execution)
+- Implement poly_data integration for live updates
+- Implement Dataset Agent (natural language filters)
+- Implement Backtesting Agent (natural language strategy requests)
