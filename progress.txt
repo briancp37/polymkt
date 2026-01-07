@@ -2176,7 +2176,139 @@ Implemented the schema evolution nonfunctional feature that ensures adding new c
 
 ### Next steps for future sessions:
 - Implement cost efficiency nonfunctional feature
-- Implement performance benchmarking nonfunctional feature
+- Implement Dataset Agent (natural language filters)
+- Implement Backtesting Agent (natural language strategy requests)
+- Implement React frontend for datasets/backtests UX
+
+---
+
+## 2026-01-07: Performance Benchmarking Feature
+
+### What was done:
+Implemented the Performance nonfunctional feature for DuckDB-over-Parquet query benchmarking. This enables tracking query performance for iterative research workflows and provides regression tracking capabilities.
+
+### Features implemented:
+1. **Performance benchmarking module** (`src/polymkt/storage/performance.py`)
+   - `PerformanceBenchmarker` class for running query benchmarks
+   - `QueryBenchmarkResult` dataclass for individual benchmark results
+   - `PerformanceBenchmarkReport` dataclass for complete benchmark reports
+
+2. **Benchmark types implemented:**
+   - `benchmark_single_market_query()` - Single market_id query over time window
+   - `benchmark_multi_market_query()` - 100+ market_ids query (PRD requirement)
+   - `benchmark_predicate_pushdown()` - Verifies filter operations in query plan
+   - `benchmark_memory_bounded_query()` - Tests query with limits for bounded memory
+   - `benchmark_days_to_exp_filter()` - Filters by days_to_exp range for backtests
+
+3. **Full benchmark suite:**
+   - `run_full_benchmark()` - Runs all benchmarks and generates report
+   - Tracks summary statistics (avg/min/max execution times)
+   - Records whether latency targets are met (single market <100ms, multi-market <500ms)
+   - Serializable to dict/JSON for API responses
+
+4. **API endpoint** (`POST /api/performance/benchmark`)
+   - Runs complete benchmark suite and returns report
+   - Works with both partitioned and monolithic data
+   - Includes query plans for pushdown verification
+   - Returns structured report with all benchmark results
+
+5. **Pydantic schemas** (in `src/polymkt/models/schemas.py`)
+   - `QueryBenchmarkResultSchema` - Single benchmark result
+   - `PerformanceBenchmarkReportSchema` - Complete report
+   - `PerformanceBenchmarkRequest` - API request options
+
+### PRD requirements met:
+- Benchmark query for a single market_id over a 30-day window ✓
+- Benchmark query for 100+ market_ids over the same window ✓
+- Verify partition pruning/predicate pushdown is effective (plan/log inspection) ✓
+- Verify memory usage is bounded (streaming/limits/spill-to-disk if needed) ✓
+- Record baseline numbers for regression tracking ✓
+
+### Tests added (`tests/test_performance.py`):
+22 tests total.
+
+**TestSingleMarketQuery (3 tests):**
+- `test_single_market_query_returns_result`: Basic functionality
+- `test_single_market_query_execution_time_recorded`: Timing verification
+- `test_single_market_query_auto_selects_market`: Auto-selection when no market specified
+
+**TestMultiMarketQuery (3 tests):**
+- `test_multi_market_query_100_markets`: 100 market query
+- `test_multi_market_query_150_markets`: All markets query
+- `test_multi_market_query_completes_in_acceptable_time`: Latency target (<500ms)
+
+**TestPredicatePushdown (3 tests):**
+- `test_predicate_pushdown_returns_plan`: Query plan generation
+- `test_predicate_pushdown_plan_shows_filter`: Plan content verification
+- `test_partitioned_data_query_plan`: Partitioned data handling
+
+**TestMemoryBoundedQuery (2 tests):**
+- `test_memory_bounded_query_with_limit`: Limit enforcement
+- `test_memory_bounded_query_large_limit`: Large limit handling
+
+**TestDaysToExpFilter (1 test):**
+- `test_days_to_exp_filter_benchmark`: days_to_exp filtering
+
+**TestFullBenchmarkReport (4 tests):**
+- `test_full_benchmark_returns_report`: Complete report generation
+- `test_full_benchmark_includes_summary`: Summary statistics
+- `test_full_benchmark_to_dict`: JSON serialization
+- `test_full_benchmark_tracks_partitioned_status`: Partitioned flag
+
+**TestPerformanceLatencyTargets (2 tests):**
+- `test_single_market_under_100ms`: 100ms target
+- `test_summary_tracks_latency_targets`: Target tracking in summary
+
+**TestPartitionedVsMonolithic (1 test):**
+- `test_both_modes_produce_valid_benchmarks`: Both modes work
+
+**TestEmptyDatabase (1 test):**
+- `test_empty_database_handles_gracefully`: Empty state handling
+
+**TestPerformanceAPI (2 tests):**
+- `test_benchmark_endpoint`: API endpoint success
+- `test_benchmark_endpoint_no_data`: Error handling when no data
+
+### PRD features marked as passing:
+- Performance: DuckDB-over-Parquet queries are fast for iterative research (single market and 100+ markets)
+
+### Sample benchmark output:
+```json
+{
+  "report_id": "uuid",
+  "created_at": "2026-01-07T...",
+  "total_trades": 1500,
+  "total_markets": 150,
+  "partitioned": false,
+  "benchmarks": [
+    {
+      "query_name": "single_market_query",
+      "execution_time_ms": 1.9,
+      "rows_returned": 10
+    },
+    {
+      "query_name": "multi_market_query",
+      "execution_time_ms": 8.5,
+      "rows_returned": 1000
+    }
+  ],
+  "summary": {
+    "avg_execution_time_ms": 9.01,
+    "single_market_under_100ms": true,
+    "multi_market_under_500ms": true
+  }
+}
+```
+
+### Notes for next person:
+- Call `POST /api/performance/benchmark` to run the full benchmark suite
+- Benchmarks work with both partitioned and non-partitioned data
+- The summary includes boolean flags for latency targets
+- Query plans are included to verify predicate pushdown
+- 581 tests all pass (22 new tests for performance)
+
+### Next steps for future sessions:
+- Implement cost efficiency nonfunctional feature
 - Implement Dataset Agent (natural language filters)
 - Implement Backtesting Agent (natural language strategy requests)
 - Implement React frontend for datasets/backtests UX

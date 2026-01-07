@@ -703,3 +703,49 @@ class DataQualityCheckRequest(BaseModel):
     """Request to run a data quality check."""
 
     run_type: str = Field("bootstrap", description="Type of run being checked")
+
+
+# =============================================================================
+# Performance benchmark schemas for query optimization tracking
+# =============================================================================
+
+
+class QueryBenchmarkResultSchema(BaseModel):
+    """Result of a single query benchmark."""
+
+    query_name: str = Field(..., description="Short name for the query type")
+    query_description: str = Field(..., description="Description of what the query does")
+    execution_time_ms: float = Field(..., description="Execution time in milliseconds")
+    rows_returned: int = Field(..., description="Number of rows returned")
+    parameters: dict[str, Any] = Field(default_factory=dict, description="Query parameters used")
+    query_plan: str | None = Field(None, description="Query execution plan")
+    memory_usage_bytes: int | None = Field(None, description="Memory usage in bytes")
+
+
+class PerformanceBenchmarkReportSchema(BaseModel):
+    """Complete performance benchmark report."""
+
+    report_id: str = Field(..., description="Unique report identifier")
+    created_at: datetime = Field(..., description="When the benchmark was run")
+    total_trades: int = Field(..., description="Total number of trades in database")
+    total_markets: int = Field(..., description="Total number of markets in database")
+    partitioned: bool = Field(..., description="Whether trades data is partitioned")
+    benchmarks: list[QueryBenchmarkResultSchema] = Field(
+        default_factory=list, description="Individual benchmark results"
+    )
+    summary: dict[str, Any] = Field(default_factory=dict, description="Summary statistics")
+
+
+class PerformanceBenchmarkRequest(BaseModel):
+    """Request to run performance benchmarks."""
+
+    include_plans: bool = Field(True, description="Include query plans in the report")
+
+
+class PerformanceBenchmarkListResponse(BaseModel):
+    """Response for listing performance benchmark reports."""
+
+    reports: list[PerformanceBenchmarkReportSchema] = Field(
+        ..., description="List of benchmark reports"
+    )
+    count: int = Field(..., description="Number of reports in this response")

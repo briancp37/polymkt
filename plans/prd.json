@@ -460,7 +460,7 @@
         "Verify memory usage is bounded (streaming/limits/spill-to-disk if needed)",
         "Record baseline numbers for regression tracking"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "nonfunctional",

@@ -38,6 +38,9 @@ from polymkt.models.schemas import (
     HybridIndexStats,
     HybridSearchResult,
     MarketSearchResult,
+    PerformanceBenchmarkReportSchema,
+    PerformanceBenchmarkRequest,
+    QueryBenchmarkResultSchema,
     RangeIssueSchema,
     ReferentialIntegrityIssueSchema,
     RunRecord,
@@ -67,6 +70,7 @@ from polymkt.signals.favorites import (
 )
 from polymkt.backtest.engine import BacktestEngine
 from polymkt.storage.data_quality import DataQualityChecker
+from polymkt.storage.performance import PerformanceBenchmarker
 
 app = FastAPI(
     title="Polymkt Analytics API",
@@ -2327,3 +2331,79 @@ def get_data_quality_report(report_id: str) -> DataQualityReportSchema:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to get report: {e}")
+
+
+# =============================================================================
+# Performance benchmark endpoints
+# =============================================================================
+
+
+@app.post("/api/performance/benchmark", response_model=PerformanceBenchmarkReportSchema)
+def run_performance_benchmark(
+    request: PerformanceBenchmarkRequest | None = None,
+) -> PerformanceBenchmarkReportSchema:
+    """
+    Run a complete performance benchmark suite.
+
+    Benchmarks DuckDB-over-Parquet query performance for:
+    - Single market_id query over 30-day window
+    - 100+ market_ids query over 30-day window
+    - Predicate pushdown/partition pruning verification
+    - Memory-bounded queries with limits
+    - days_to_exp filtering for backtests
+
+    Records baseline numbers for regression tracking.
+    """
+    try:
+        # Check if parquet files exist
+        if not settings.parquet_dir.exists():
+            raise HTTPException(
+                status_code=400,
+                detail="No Parquet data found. Run bootstrap first.",
+            )
+
+        # Check if partitioned
+        trades_path = settings.parquet_dir / "trades.parquet"
+        trades_dir = settings.parquet_dir / "trades"
+        partitioned = trades_dir.exists() and trades_dir.is_dir()
+
+        duckdb_layer = DuckDBLayer(
+            settings.duckdb_path,
+            settings.parquet_dir,
+            partitioned=partitioned,
+        )
+
+        try:
+            duckdb_layer.create_views()
+            benchmarker = PerformanceBenchmarker(duckdb_layer)
+
+            include_plans = request.include_plans if request else True
+            report = benchmarker.run_full_benchmark(include_plans=include_plans)
+
+            return PerformanceBenchmarkReportSchema(
+                report_id=report.report_id,
+                created_at=report.created_at,
+                total_trades=report.total_trades,
+                total_markets=report.total_markets,
+                partitioned=report.partitioned,
+                benchmarks=[
+                    QueryBenchmarkResultSchema(
+                        query_name=b.query_name,
+                        query_description=b.query_description,
+                        execution_time_ms=b.execution_time_ms,
+                        rows_returned=b.rows_returned,
+                        parameters=b.parameters,
+                        query_plan=b.query_plan,
+                        memory_usage_bytes=b.memory_usage_bytes,
+                    )
+                    for b in report.benchmarks
+                ],
+                summary=report.summary,
+            )
+        finally:
+            duckdb_layer.close()
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to run benchmark: {e}")
