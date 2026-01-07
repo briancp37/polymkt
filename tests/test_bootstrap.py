@@ -247,13 +247,15 @@ def test_duckdb_query_trades(
         duckdb_layer.create_views()
 
         # Query single market
-        trades = duckdb_layer.query_trades(market_id="market1")
+        trades, total_count = duckdb_layer.query_trades(market_id="market1")
         assert len(trades) == 2
+        assert total_count == 2
         assert all(t["market_id"] == "market1" for t in trades)
 
         # Query multiple markets
-        trades = duckdb_layer.query_trades(market_ids=["market1", "market2"])
+        trades, total_count = duckdb_layer.query_trades(market_ids=["market1", "market2"])
         assert len(trades) == 3
+        assert total_count == 3
     finally:
         duckdb_layer.close()
 

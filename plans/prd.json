@@ -133,7 +133,7 @@
         "Verify results are sorted or include a stable ordering option",
         "Verify response supports pagination or row limits"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "functional",

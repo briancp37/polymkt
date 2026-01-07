@@ -147,8 +147,28 @@ class DuckDBLayer:
         end_time: str | None = None,
         limit: int = 1000,
         offset: int = 0,
-    ) -> list[dict[str, Any]]:
-        """Query trades with optional filters."""
+        order_by: str = "timestamp",
+        order_dir: str = "ASC",
+    ) -> tuple[list[dict[str, Any]], int]:
+        """
+        Query trades with optional filters.
+
+        Args:
+            market_id: Filter by single market ID
+            market_ids: Filter by multiple market IDs
+            start_time: Filter trades >= this timestamp
+            end_time: Filter trades <= this timestamp
+            limit: Max rows to return (default 1000)
+            offset: Number of rows to skip (default 0)
+            order_by: Column to sort by (default "timestamp").
+                      Options: "timestamp", "price", "usd_amount", "token_amount"
+                      Use "timestamp,transaction_hash" for stable ordering.
+            order_dir: Sort direction "ASC" or "DESC" (default "ASC")
+
+        Returns:
+            Tuple of (trades list, total_count) where total_count is the
+            total number of matching rows before pagination.
+        """
         conditions: list[str] = []
         params: list[Any] = []
 
@@ -169,14 +189,50 @@ class DuckDBLayer:
             params.append(end_time)
 
         where_clause = " AND ".join(conditions) if conditions else "1=1"
+
+        # Validate order_by to prevent SQL injection
+        allowed_order_columns = {
+            "timestamp",
+            "price",
+            "usd_amount",
+            "token_amount",
+            "market_id",
+            "transaction_hash",
+        }
+        # Support composite ordering like "timestamp,transaction_hash"
+        order_columns = [col.strip() for col in order_by.split(",")]
+        for col in order_columns:
+            if col not in allowed_order_columns:
+                raise ValueError(
+                    f"Invalid order_by column: {col}. "
+                    f"Allowed: {allowed_order_columns}"
+                )
+        order_by_clause = ", ".join(order_columns)
+
+        # Validate order_dir
+        order_dir_upper = order_dir.upper()
+        if order_dir_upper not in ("ASC", "DESC"):
+            raise ValueError(f"Invalid order_dir: {order_dir}. Must be ASC or DESC")
+
+        # First, get total count for pagination
+        count_sql = f"""
+            SELECT COUNT(*) FROM v_trades
+            WHERE {where_clause}
+        """
+        count_result = self.conn.execute(count_sql, params).fetchone()
+        total_count = count_result[0] if count_result else 0
+
+        # Now get the paginated results
         sql = f"""
             SELECT * FROM v_trades
             WHERE {where_clause}
-            ORDER BY timestamp
+            ORDER BY {order_by_clause} {order_dir_upper}
             LIMIT ? OFFSET ?
         """
-        params.extend([limit, offset])
+        query_params = params + [limit, offset]
 
-        result = self.conn.execute(sql, params)
+        result = self.conn.execute(sql, query_params)
         columns = [desc[0] for desc in result.description]
-        return [dict(zip(columns, row)) for row in result.fetchall()]
+        trades = [dict(zip(columns, row)) for row in result.fetchall()]
+
+        return trades, total_count

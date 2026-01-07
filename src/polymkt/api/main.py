@@ -40,6 +40,8 @@ class TradesQueryRequest(BaseModel):
     end_time: str | None = None
     limit: int = 1000
     offset: int = 0
+    order_by: str = "timestamp"
+    order_dir: str = "ASC"
 
 
 class TradesQueryResponse(BaseModel):
@@ -47,6 +49,8 @@ class TradesQueryResponse(BaseModel):
 
     trades: list[dict[str, Any]]
     count: int
+    total_count: int
+    has_more: bool
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -97,6 +101,11 @@ def query_trades(request: TradesQueryRequest) -> TradesQueryResponse:
 
     Supports filtering by single market_id, multiple market_ids,
     and time range (start_time, end_time).
+
+    Results can be sorted using order_by (comma-separated columns) and order_dir.
+    Use order_by="timestamp,transaction_hash" for stable deterministic ordering.
+
+    Response includes total_count and has_more for proper pagination.
     """
     # Check if Parquet files exist
     if not (settings.parquet_dir / "trades.parquet").exists():
@@ -110,15 +119,25 @@ def query_trades(request: TradesQueryRequest) -> TradesQueryResponse:
         # Ensure views exist
         duckdb_layer.create_views()
 
-        trades = duckdb_layer.query_trades(
+        trades, total_count = duckdb_layer.query_trades(
             market_id=request.market_id,
             market_ids=request.market_ids,
             start_time=request.start_time,
             end_time=request.end_time,
             limit=request.limit,
             offset=request.offset,
+            order_by=request.order_by,
+            order_dir=request.order_dir,
         )
-        return TradesQueryResponse(trades=trades, count=len(trades))
+        has_more = (request.offset + len(trades)) < total_count
+        return TradesQueryResponse(
+            trades=trades,
+            count=len(trades),
+            total_count=total_count,
+            has_more=has_more,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     finally:
         duckdb_layer.close()
 

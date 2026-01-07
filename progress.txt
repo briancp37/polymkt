@@ -99,3 +99,50 @@ Implemented comprehensive field normalization and validation for the bootstrap i
 - Add Parquet partitioning for query optimization
 - Implement the search indices (BM25 + vector search)
 - Query interface enhancements (stable ordering option)
+
+---
+
+## 2026-01-06: Query Interface Enhancement Feature
+
+### What was done:
+Implemented the complete query interface for filtering trades by market_id and time range, with proper pagination support and stable ordering options.
+
+### Features implemented:
+1. **Enhanced `query_trades()` method** (`src/polymkt/storage/duckdb_layer.py:142-238`)
+   - Added `order_by` parameter supporting multiple columns (e.g., "timestamp,transaction_hash" for stable ordering)
+   - Added `order_dir` parameter ("ASC" or "DESC")
+   - Returns tuple of (trades, total_count) for proper pagination UI
+   - Input validation for order_by columns (prevents SQL injection)
+   - Allowed columns: timestamp, price, usd_amount, token_amount, market_id, transaction_hash
+
+2. **Enhanced API response** (`src/polymkt/api/main.py`)
+   - `TradesQueryRequest` now includes `order_by` and `order_dir` parameters
+   - `TradesQueryResponse` now includes:
+     - `count`: Number of rows in current page
+     - `total_count`: Total matching rows (for "Results 1-50 of 1,234" display)
+     - `has_more`: Boolean indicating if more pages exist
+   - Proper error handling for invalid order parameters (returns 400)
+
+3. **PRD requirements met:**
+   - Filter by single market_id ✓
+   - Filter by start/end timestamps ✓
+   - Results sorted with stable ordering option (timestamp,transaction_hash) ✓
+   - Pagination with limit/offset ✓
+   - Response includes total_count for pagination UI ✓
+
+### Tests:
+64 tests passing (14 new tests for query interface).
+- `TestQueryFiltering`: Tests for market_id and time range filtering
+- `TestQueryOrdering`: Tests for ordering by different columns, ASC/DESC, composite keys
+- `TestQueryPagination`: Tests for limit, offset, total_count, has_more
+- `TestQueryIntegration`: End-to-end test combining all features
+
+### PRD features marked as passing:
+- Query interface: filter by a single market_id and time range
+
+### Next steps for future sessions:
+- Implement query interface for 100+ market_ids efficiently (predicate pushdown)
+- Implement schema validation for custom columns (category, closedTime, tags) - events join
+- Implement incremental updates with watermark-based fetching
+- Add Parquet partitioning for query optimization
+- Implement the search indices (BM25 + vector search)
