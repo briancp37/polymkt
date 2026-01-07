@@ -13,6 +13,8 @@ class Settings(BaseSettings):
     # Data paths
     data_dir: Path = Path("data")
     parquet_dir: Path = Path("data/parquet")
+    parquet_raw_dir: Path = Path("data/parquet/raw")
+    parquet_analytics_dir: Path = Path("data/parquet/analytics")
     duckdb_path: Path = Path("data/polymkt.duckdb")
     metadata_db_path: Path = Path("data/metadata.db")
 

@@ -11,7 +11,7 @@ logger = structlog.get_logger()
 
 def get_view_definitions(parquet_dir: str, partitioned: bool = False) -> dict[str, str]:
     """
-    Get view definitions for DuckDB.
+    Get view definitions for DuckDB (legacy single-layer mode).
 
     Args:
         parquet_dir: Absolute path to parquet directory
@@ -105,6 +105,140 @@ def get_view_definitions(parquet_dir: str, partitioned: bool = False) -> dict[st
     }
 
 
+def get_layered_view_definitions(
+    raw_dir: str,
+    analytics_dir: str,
+    partitioned: bool = False,
+) -> dict[str, str]:
+    """
+    Get view definitions for DuckDB with raw/analytics layer separation.
+
+    Creates views for both raw layer (immutable source data) and analytics
+    layer (derived fields like days_to_exp).
+
+    Args:
+        raw_dir: Absolute path to raw parquet directory
+        analytics_dir: Absolute path to analytics parquet directory
+        partitioned: Whether trades data is partitioned
+
+    Returns:
+        Dictionary of view name to SQL definition
+    """
+    # Raw layer sources
+    if partitioned:
+        raw_trades_source = f"read_parquet('{raw_dir}/trades/**/*.parquet', hive_partitioning=true)"
+        analytics_trades_source = f"read_parquet('{analytics_dir}/trades_analytics/**/*.parquet', hive_partitioning=true)"
+    else:
+        raw_trades_source = f"read_parquet('{raw_dir}/trades.parquet')"
+        analytics_trades_source = f"read_parquet('{analytics_dir}/trades_analytics.parquet')"
+
+    return {
+        # Raw layer views (immutable, no derived fields)
+        "v_markets_raw": f"""
+            CREATE OR REPLACE VIEW v_markets_raw AS
+            SELECT
+                id,
+                question,
+                created_at,
+                answer1,
+                answer2,
+                neg_risk,
+                market_slug,
+                token1,
+                token2,
+                condition_id,
+                volume,
+                ticker,
+                closed_time,
+                description,
+                category
+            FROM read_parquet('{raw_dir}/markets.parquet')
+        """,
+        "v_trades_raw": f"""
+            CREATE OR REPLACE VIEW v_trades_raw AS
+            SELECT
+                timestamp,
+                market_id,
+                maker,
+                taker,
+                nonusdc_side,
+                maker_direction,
+                taker_direction,
+                price,
+                usd_amount,
+                token_amount,
+                transaction_hash
+            FROM {raw_trades_source}
+        """,
+        "v_order_filled_raw": f"""
+            CREATE OR REPLACE VIEW v_order_filled_raw AS
+            SELECT
+                timestamp,
+                maker,
+                maker_asset_id,
+                maker_amount_filled,
+                taker,
+                taker_asset_id,
+                taker_amount_filled,
+                transaction_hash
+            FROM read_parquet('{raw_dir}/order_filled.parquet')
+        """,
+        # Analytics layer views (with derived fields)
+        "v_trades_analytics": f"""
+            CREATE OR REPLACE VIEW v_trades_analytics AS
+            SELECT
+                timestamp,
+                market_id,
+                maker,
+                taker,
+                nonusdc_side,
+                maker_direction,
+                taker_direction,
+                price,
+                usd_amount,
+                token_amount,
+                transaction_hash,
+                days_to_exp
+            FROM {analytics_trades_source}
+        """,
+        # Convenience views that join analytics trades with market metadata
+        "v_trades_with_markets": f"""
+            CREATE OR REPLACE VIEW v_trades_with_markets AS
+            SELECT
+                t.timestamp,
+                t.market_id,
+                t.maker,
+                t.taker,
+                t.nonusdc_side,
+                t.maker_direction,
+                t.taker_direction,
+                t.price,
+                t.usd_amount,
+                t.token_amount,
+                t.transaction_hash,
+                t.days_to_exp,
+                m.question,
+                m.category,
+                m.closed_time
+            FROM v_trades_analytics t
+            LEFT JOIN v_markets_raw m ON t.market_id = m.id
+        """,
+        # Alias views for backward compatibility
+        "v_markets": f"""
+            CREATE OR REPLACE VIEW v_markets AS
+            SELECT * FROM v_markets_raw
+        """,
+        "v_trades": f"""
+            CREATE OR REPLACE VIEW v_trades AS
+            SELECT * FROM v_trades_raw
+        """,
+        "v_order_filled": f"""
+            CREATE OR REPLACE VIEW v_order_filled AS
+            SELECT * FROM v_order_filled_raw
+        """,
+    }
+
+
 class DuckDBLayer:
     """DuckDB layer for querying Parquet files with pre-defined views."""
 
@@ -113,10 +247,27 @@ class DuckDBLayer:
         db_path: Path,
         parquet_dir: Path,
         partitioned: bool = False,
+        layered: bool = False,
+        raw_dir: Path | None = None,
+        analytics_dir: Path | None = None,
     ) -> None:
+        """
+        Initialize DuckDB layer.
+
+        Args:
+            db_path: Path to DuckDB database file
+            parquet_dir: Directory for Parquet files (legacy single-layer mode)
+            partitioned: Whether trades data is partitioned
+            layered: Enable raw/analytics layer separation
+            raw_dir: Directory for raw Parquet files (layered mode)
+            analytics_dir: Directory for analytics Parquet files (layered mode)
+        """
         self.db_path = db_path
         self.parquet_dir = parquet_dir
         self.partitioned = partitioned
+        self.layered = layered
+        self.raw_dir = raw_dir
+        self.analytics_dir = analytics_dir
         self._conn: duckdb.DuckDBPyConnection | None = None
 
     @property
@@ -138,9 +289,25 @@ class DuckDBLayer:
     def create_views(self) -> list[str]:
         """Create all views over Parquet files."""
         created_views: list[str] = []
-        parquet_dir_str = str(self.parquet_dir.absolute())
 
-        view_definitions = get_view_definitions(parquet_dir_str, self.partitioned)
+        if self.layered and self.raw_dir and self.analytics_dir:
+            # Use layered view definitions (raw + analytics)
+            raw_dir_str = str(self.raw_dir.absolute())
+            analytics_dir_str = str(self.analytics_dir.absolute())
+            view_definitions = get_layered_view_definitions(
+                raw_dir_str, analytics_dir_str, self.partitioned
+            )
+            logger.info(
+                "creating_layered_views",
+                raw_dir=raw_dir_str,
+                analytics_dir=analytics_dir_str,
+                partitioned=self.partitioned,
+            )
+        else:
+            # Use legacy single-layer view definitions
+            parquet_dir_str = str(self.parquet_dir.absolute())
+            view_definitions = get_view_definitions(parquet_dir_str, self.partitioned)
+
         for view_name, view_sql in view_definitions.items():
             self.conn.execute(view_sql)
             created_views.append(view_name)
@@ -151,7 +318,22 @@ class DuckDBLayer:
     def verify_views(self) -> dict[str, int]:
         """Verify all views are queryable and return row counts."""
         counts: dict[str, int] = {}
-        view_names = ["v_markets", "v_trades", "v_order_filled", "v_trades_with_markets"]
+
+        if self.layered:
+            # Layered mode has more views
+            view_names = [
+                "v_markets_raw",
+                "v_trades_raw",
+                "v_order_filled_raw",
+                "v_trades_analytics",
+                "v_trades_with_markets",
+                "v_markets",
+                "v_trades",
+                "v_order_filled",
+            ]
+        else:
+            view_names = ["v_markets", "v_trades", "v_order_filled", "v_trades_with_markets"]
+
         for view_name in view_names:
             result = self.conn.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()
             counts[view_name] = result[0] if result else 0

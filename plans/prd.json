@@ -59,7 +59,7 @@
         "Verify analytics layer contains derived fields needed for research/backtests (e.g., days_to_exp)",
         "Verify both layers can be queried independently"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "functional",

@@ -92,3 +92,14 @@ class BootstrapSummary(BaseModel):
     rows_quarantined: dict[str, int] = Field(
         default_factory=dict, description="Rows quarantined per entity due to validation errors"
     )
+
+
+class CurateSummary(BaseModel):
+    """Summary of a curate operation."""
+
+    run_id: str
+    status: str
+    duration_seconds: float
+    trades_rows_read: int
+    trades_rows_written: int
+    analytics_files: list[str]

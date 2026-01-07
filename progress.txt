@@ -349,4 +349,83 @@ Implemented Parquet partitioning for trades data using year/month/day + market_i
 - Implement the search indices (BM25 + vector search)
 - Implement election group concept for "buy the favorite" backtests
 - Implement backtest v1: buy favorite at 90 days to expiry
-- Implement raw/analytics layer separation
+
+---
+
+## 2026-01-06: Raw/Analytics Layer Separation Feature
+
+### What was done:
+Implemented immutable raw layer and curated analytics layer separation for trades data, enabling professional data pipeline patterns where raw data is preserved and derived fields are computed in a separate analytics layer.
+
+### Features implemented:
+1. **Configuration updates** (`src/polymkt/config.py`)
+   - Added `parquet_raw_dir` (data/parquet/raw) for immutable source data
+   - Added `parquet_analytics_dir` (data/parquet/analytics) for derived analytics data
+
+2. **Parquet analytics schema** (`src/polymkt/storage/parquet.py`)
+   - Added `TRADES_ANALYTICS_SCHEMA` with `days_to_exp` derived field
+   - Added `write_trades_analytics()` method supporting partitioned/monolithic writes
+   - Supports same partitioning strategy (year/month/day/hash_bucket) as raw layer
+
+3. **Curate pipeline** (`src/polymkt/pipeline/curate.py`)
+   - `run_curate()` function reads from raw layer and builds analytics layer
+   - Uses DuckDB in-memory join to compute `days_to_exp` from trades + markets
+   - Raw layer is NEVER modified (verified by tests)
+   - Returns `CurateSummary` with run metadata (rows read/written, files created)
+
+4. **DuckDB layered views** (`src/polymkt/storage/duckdb_layer.py`)
+   - Added `get_layered_view_definitions()` for raw/analytics layer mode
+   - Raw views: `v_markets_raw`, `v_trades_raw`, `v_order_filled_raw`
+   - Analytics views: `v_trades_analytics` (with materialized days_to_exp)
+   - Combined view: `v_trades_with_markets` (analytics trades + market metadata)
+   - Backward compatibility: `v_markets`, `v_trades`, `v_order_filled` alias to raw views
+   - `DuckDBLayer` supports `layered=True` mode with `raw_dir` and `analytics_dir` params
+
+5. **API endpoint** (`src/polymkt/api/main.py`)
+   - `POST /api/curate` endpoint to run curate step via API
+
+6. **Schema models** (`src/polymkt/models/schemas.py`)
+   - Added `CurateSummary` Pydantic model for curate run results
+
+### PRD requirements met:
+- Ingest/convert CSV into a raw Parquet layer ✓
+- Run a curate step that builds an analytics Parquet layer ✓
+- Verify raw layer is unchanged after curate step ✓ (MD5 hash verification tests)
+- Verify analytics layer contains derived fields (days_to_exp) ✓
+- Verify both layers can be queried independently ✓
+
+### Tests added (`tests/test_layers.py`):
+129 tests passing (13 new tests for layer separation).
+
+**TestRawLayerImmutability (2 tests):**
+- `test_raw_layer_unchanged_after_curate`: MD5 hash verification
+- `test_raw_layer_row_count_preserved`: Row count preservation
+
+**TestCurateStep (2 tests):**
+- `test_curate_creates_analytics_parquet`: Analytics file creation
+- `test_curate_summary_has_correct_counts`: Summary accuracy
+
+**TestAnalyticsLayerDerivedFields (3 tests):**
+- `test_analytics_layer_has_days_to_exp`: Schema verification
+- `test_analytics_days_to_exp_computed_correctly`: ~90 day calculation
+- `test_analytics_days_to_exp_null_for_no_closed_time`: NULL handling
+
+**TestLayeredDuckDBViews (4 tests):**
+- `test_layered_views_created`: All 8 views created
+- `test_raw_views_have_no_derived_fields`: Raw view schema
+- `test_analytics_view_has_derived_fields`: Analytics view schema
+- `test_both_layers_queryable_independently`: Independent queries
+
+**TestBackwardCompatibility (2 tests):**
+- `test_legacy_mode_still_works`: Non-layered mode
+- `test_alias_views_work_in_layered_mode`: Alias views
+
+### PRD features marked as passing:
+- Maintain an immutable raw layer and a curated analytics layer for trades
+
+### Next steps for future sessions:
+- Implement schema validation for custom columns (category, closedTime, tags) - events join
+- Implement incremental updates with watermark-based fetching
+- Implement the search indices (BM25 + vector search)
+- Implement election group concept for "buy the favorite" backtests
+- Implement backtest v1: buy favorite at 90 days to expiry

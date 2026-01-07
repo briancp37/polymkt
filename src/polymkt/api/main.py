@@ -6,8 +6,9 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from polymkt.config import settings
-from polymkt.models.schemas import BootstrapSummary, RunRecord
+from polymkt.models.schemas import BootstrapSummary, CurateSummary, RunRecord
 from polymkt.pipeline.bootstrap import run_bootstrap
+from polymkt.pipeline.curate import run_curate
 from polymkt.storage.duckdb_layer import DuckDBLayer
 from polymkt.storage.metadata import MetadataStore
 
@@ -89,6 +90,23 @@ def bootstrap_import() -> BootstrapSummary:
         raise HTTPException(status_code=404, detail=f"CSV file not found: {e}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Bootstrap failed: {e}")
+
+
+@app.post("/api/curate", response_model=CurateSummary)
+def curate_analytics() -> CurateSummary:
+    """
+    Run the curate step to build the analytics layer.
+
+    Reads raw Parquet files and computes derived fields (e.g., days_to_exp)
+    to create the analytics layer. The raw layer is NOT modified.
+    """
+    try:
+        summary = run_curate()
+        return summary
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=f"Raw data not found: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Curate failed: {e}")
 
 
 @app.get("/api/runs", response_model=RunListResponse)

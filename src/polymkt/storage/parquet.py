@@ -55,6 +55,23 @@ ORDER_FILLED_SCHEMA = pa.schema([
     ("transaction_hash", pa.string()),
 ])
 
+# Analytics layer schema for trades with derived fields
+TRADES_ANALYTICS_SCHEMA = pa.schema([
+    ("timestamp", pa.timestamp("us", tz="UTC")),
+    ("market_id", pa.string()),
+    ("maker", pa.string()),
+    ("taker", pa.string()),
+    ("nonusdc_side", pa.string()),
+    ("maker_direction", pa.string()),
+    ("taker_direction", pa.string()),
+    ("price", pa.float64()),
+    ("usd_amount", pa.float64()),
+    ("token_amount", pa.float64()),
+    ("transaction_hash", pa.string()),
+    # Derived fields for analytics
+    ("days_to_exp", pa.float64()),  # Days to expiry from trade timestamp
+])
+
 
 def compute_hash_bucket(market_id: pa.Array, bucket_count: int) -> pa.Array:
     """Compute hash bucket for market_id using consistent hashing."""
@@ -219,6 +236,77 @@ class ParquetWriter:
             entity="order_filled",
             path=str(output_path),
             rows=table.num_rows,
+        )
+        return output_path
+
+    def write_trades_analytics(self, table: pa.Table) -> Path:
+        """Write trades analytics data (with derived fields) to Parquet, optionally partitioned."""
+        table = table.cast(TRADES_ANALYTICS_SCHEMA)
+
+        if self.partitioning_enabled:
+            return self._write_trades_analytics_partitioned(table)
+        else:
+            return self._write_trades_analytics_monolithic(table)
+
+    def _write_trades_analytics_monolithic(self, table: pa.Table) -> Path:
+        """Write trades analytics as a single Parquet file."""
+        output_path = self.output_dir / "trades_analytics.parquet"
+        pq.write_table(
+            table,
+            output_path,
+            compression=self.compression,
+            row_group_size=self.row_group_size,
+        )
+        logger.info(
+            "parquet_written",
+            entity="trades_analytics",
+            path=str(output_path),
+            rows=table.num_rows,
+            partitioned=False,
+        )
+        return output_path
+
+    def _write_trades_analytics_partitioned(self, table: pa.Table) -> Path:
+        """Write trades analytics as partitioned Parquet dataset (year/month/day/hash_bucket)."""
+        output_path = self.output_dir / "trades_analytics"
+
+        # Add partition columns
+        table_with_partitions = add_partition_columns(table, self.hash_bucket_count)
+
+        # Define partitioning scheme
+        partitioning = ds.partitioning(
+            pa.schema([
+                ("year", pa.int32()),
+                ("month", pa.int32()),
+                ("day", pa.int32()),
+                ("hash_bucket", pa.int32()),
+            ]),
+            flavor="hive",
+        )
+
+        # Write using PyArrow dataset API
+        ds.write_dataset(
+            table_with_partitions,
+            output_path,
+            format="parquet",
+            partitioning=partitioning,
+            existing_data_behavior="delete_matching",
+            file_options=ds.ParquetFileFormat().make_write_options(
+                compression=self.compression,
+            ),
+        )
+
+        # Count unique partitions for logging
+        unique_dates = table_with_partitions.group_by(["year", "month", "day"]).aggregate([]).num_rows
+
+        logger.info(
+            "parquet_written",
+            entity="trades_analytics",
+            path=str(output_path),
+            rows=table.num_rows,
+            partitioned=True,
+            partition_count=unique_dates,
+            hash_buckets=self.hash_bucket_count,
         )
         return output_path
 
