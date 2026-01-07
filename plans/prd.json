@@ -47,7 +47,7 @@
         "Verify partition pruning reduces scanned files (inspect query plan / logs)",
         "Verify query returns correct rows and completes within target latency"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "functional",

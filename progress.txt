@@ -272,3 +272,81 @@ Implemented the `days_to_exp` derived field for trades, enabling backtesting str
 - Implement the search indices (BM25 + vector search)
 - Implement election group concept for "buy the favorite" backtests
 - Implement backtest v1: buy favorite at 90 days to expiry
+
+---
+
+## 2026-01-06: Parquet Partitioning Feature
+
+### What was done:
+Implemented Parquet partitioning for trades data using year/month/day + market_id hash bucket strategy, enabling efficient query filtering and partition pruning.
+
+### Features implemented:
+1. **Partitioning infrastructure** (`src/polymkt/storage/parquet.py`)
+   - `compute_hash_bucket()` - Deterministic MD5-based hash bucketing for market_id
+   - `add_partition_columns()` - Extracts year, month, day from timestamp and computes hash_bucket
+   - `ParquetWriter` updated with `partitioning_enabled` and `hash_bucket_count` parameters
+   - Hive-style partitioned writes: `trades/year=YYYY/month=MM/day=DD/hash_bucket=N/*.parquet`
+
+2. **DuckDB layer updates** (`src/polymkt/storage/duckdb_layer.py`)
+   - `get_view_definitions()` function dynamically generates views based on partitioning mode
+   - Partitioned mode uses `read_parquet('{path}/trades/**/*.parquet', hive_partitioning=true)`
+   - `DuckDBLayer` constructor accepts `partitioned` parameter
+   - Added `explain_query()` method for query plan inspection
+
+3. **Configuration** (`src/polymkt/config.py`)
+   - `parquet_partitioning_enabled: bool = False` (opt-in for backward compatibility)
+   - `parquet_hash_bucket_count: int = 8` (configurable bucket count)
+
+4. **Bootstrap integration** (`src/polymkt/pipeline/bootstrap.py`)
+   - `run_bootstrap()` accepts `partitioning_enabled` and `hash_bucket_count` parameters
+   - Passes partitioning config to `ParquetWriter` and `DuckDBLayer`
+
+### PRD requirements met:
+- Configure partitioning strategy (year/month/day + market_id hash bucket) ✓
+- Run Parquet write with partitioning enabled ✓
+- Run DuckDB query filtering by market_id and time range ✓
+- Verify partition pruning via query plan inspection ✓
+- Verify query returns correct rows ✓
+
+### Tests added (`tests/test_partitioning.py`):
+116 tests passing (15 new tests for partitioning feature).
+
+**TestHashBucketComputation (3 tests):**
+- `test_compute_hash_bucket_returns_valid_range`: Buckets in [0, bucket_count)
+- `test_compute_hash_bucket_deterministic`: Same market_id → same bucket
+- `test_compute_hash_bucket_distribution`: Buckets distribute across IDs
+
+**TestAddPartitionColumns (1 test):**
+- `test_add_partition_columns_extracts_date_parts`: Year/month/day extraction
+
+**TestPartitionedParquetWriter (2 tests):**
+- `test_write_trades_partitioned_creates_directory_structure`: Hive directory layout
+- `test_write_trades_monolithic_creates_single_file`: Backward compatible
+
+**TestBootstrapWithPartitioning (2 tests):**
+- `test_bootstrap_with_partitioning_creates_partitioned_trades`: Partitioned output
+- `test_bootstrap_without_partitioning_creates_single_file`: Default behavior
+
+**TestDuckDBPartitionedReads (3 tests):**
+- `test_duckdb_can_read_partitioned_trades`: Views work with partitioned data
+- `test_duckdb_query_partitioned_by_market_id`: Market filter works
+- `test_duckdb_query_partitioned_by_time_range`: Time filter works
+
+**TestPartitionPruning (3 tests):**
+- `test_query_plan_shows_filter_for_partitioned_data`: EXPLAIN works
+- `test_query_plan_with_time_filter`: Time filter in plan
+- `test_query_returns_correct_rows_after_partitioning`: Data integrity
+
+**TestBackwardCompatibility (1 test):**
+- `test_existing_tests_work_with_partitioning_disabled`: No regressions
+
+### PRD features marked as passing:
+- Partition Parquet to speed up common filters (time + market_id) using a professional DuckDB-over-Parquet setup
+
+### Next steps for future sessions:
+- Implement schema validation for custom columns (category, closedTime, tags) - events join
+- Implement incremental updates with watermark-based fetching
+- Implement the search indices (BM25 + vector search)
+- Implement election group concept for "buy the favorite" backtests
+- Implement backtest v1: buy favorite at 90 days to expiry
+- Implement raw/analytics layer separation

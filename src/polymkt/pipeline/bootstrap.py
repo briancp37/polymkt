@@ -118,6 +118,8 @@ def run_bootstrap(
     metadata_db_path: Path | None = None,
     normalize_addresses: bool = True,
     validate_data: bool = True,
+    partitioning_enabled: bool | None = None,
+    hash_bucket_count: int | None = None,
 ) -> BootstrapSummary:
     """
     Run the bootstrap import process.
@@ -134,6 +136,8 @@ def run_bootstrap(
         metadata_db_path: Path to metadata SQLite database
         normalize_addresses: Whether to normalize Ethereum addresses (lowercase 0x)
         validate_data: Whether to validate and quarantine invalid rows
+        partitioning_enabled: Whether to partition trades Parquet by year/month/day/hash_bucket
+        hash_bucket_count: Number of hash buckets for market_id partitioning
 
     Returns:
         BootstrapSummary with run details including any validation issues
@@ -145,6 +149,12 @@ def run_bootstrap(
     parquet_dir = parquet_dir or settings.parquet_dir
     duckdb_path = duckdb_path or settings.duckdb_path
     metadata_db_path = metadata_db_path or settings.metadata_db_path
+    partitioning_enabled = (
+        partitioning_enabled
+        if partitioning_enabled is not None
+        else settings.parquet_partitioning_enabled
+    )
+    hash_bucket_count = hash_bucket_count or settings.parquet_hash_bucket_count
 
     # Initialize components
     run_id = str(uuid.uuid4())
@@ -152,7 +162,11 @@ def run_bootstrap(
     timer_start = perf_counter()
 
     metadata_store = MetadataStore(metadata_db_path)
-    parquet_writer = ParquetWriter(parquet_dir)
+    parquet_writer = ParquetWriter(
+        parquet_dir,
+        partitioning_enabled=partitioning_enabled,
+        hash_bucket_count=hash_bucket_count,
+    )
 
     # Create initial run record
     run_record = RunRecord(
@@ -245,8 +259,10 @@ def run_bootstrap(
             rows_quarantined["order_filled"] = 0
 
         # Create DuckDB views
-        logger.info("creating_duckdb_views")
-        duckdb_layer = DuckDBLayer(duckdb_path, parquet_dir)
+        logger.info("creating_duckdb_views", partitioned=partitioning_enabled)
+        duckdb_layer = DuckDBLayer(
+            duckdb_path, parquet_dir, partitioned=partitioning_enabled
+        )
         try:
             created_views = duckdb_layer.create_views()
             view_counts = duckdb_layer.verify_views()

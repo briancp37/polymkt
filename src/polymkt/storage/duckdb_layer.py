@@ -8,91 +8,115 @@ import structlog
 
 logger = structlog.get_logger()
 
-VIEW_DEFINITIONS = {
-    "v_markets": """
-        CREATE OR REPLACE VIEW v_markets AS
-        SELECT
-            id,
-            question,
-            created_at,
-            answer1,
-            answer2,
-            neg_risk,
-            market_slug,
-            token1,
-            token2,
-            condition_id,
-            volume,
-            ticker,
-            closed_time,
-            description,
-            category
-        FROM read_parquet('{parquet_dir}/markets.parquet')
-    """,
-    "v_trades": """
-        CREATE OR REPLACE VIEW v_trades AS
-        SELECT
-            timestamp,
-            market_id,
-            maker,
-            taker,
-            nonusdc_side,
-            maker_direction,
-            taker_direction,
-            price,
-            usd_amount,
-            token_amount,
-            transaction_hash
-        FROM read_parquet('{parquet_dir}/trades.parquet')
-    """,
-    "v_order_filled": """
-        CREATE OR REPLACE VIEW v_order_filled AS
-        SELECT
-            timestamp,
-            maker,
-            maker_asset_id,
-            maker_amount_filled,
-            taker,
-            taker_asset_id,
-            taker_amount_filled,
-            transaction_hash
-        FROM read_parquet('{parquet_dir}/order_filled.parquet')
-    """,
-    "v_trades_with_markets": """
-        CREATE OR REPLACE VIEW v_trades_with_markets AS
-        SELECT
-            t.timestamp,
-            t.market_id,
-            t.maker,
-            t.taker,
-            t.nonusdc_side,
-            t.maker_direction,
-            t.taker_direction,
-            t.price,
-            t.usd_amount,
-            t.token_amount,
-            t.transaction_hash,
-            m.question,
-            m.category,
-            m.closed_time,
-            -- Derived field: days to expiry
-            CASE
-                WHEN m.closed_time IS NOT NULL
-                THEN EXTRACT(EPOCH FROM (m.closed_time - t.timestamp)) / 86400.0
-                ELSE NULL
-            END AS days_to_exp
-        FROM v_trades t
-        LEFT JOIN v_markets m ON t.market_id = m.id
-    """,
-}
+
+def get_view_definitions(parquet_dir: str, partitioned: bool = False) -> dict[str, str]:
+    """
+    Get view definitions for DuckDB.
+
+    Args:
+        parquet_dir: Absolute path to parquet directory
+        partitioned: Whether trades data is partitioned
+
+    Returns:
+        Dictionary of view name to SQL definition
+    """
+    # For partitioned trades, read from directory with hive partitioning
+    if partitioned:
+        trades_source = f"read_parquet('{parquet_dir}/trades/**/*.parquet', hive_partitioning=true)"
+    else:
+        trades_source = f"read_parquet('{parquet_dir}/trades.parquet')"
+
+    return {
+        "v_markets": f"""
+            CREATE OR REPLACE VIEW v_markets AS
+            SELECT
+                id,
+                question,
+                created_at,
+                answer1,
+                answer2,
+                neg_risk,
+                market_slug,
+                token1,
+                token2,
+                condition_id,
+                volume,
+                ticker,
+                closed_time,
+                description,
+                category
+            FROM read_parquet('{parquet_dir}/markets.parquet')
+        """,
+        "v_trades": f"""
+            CREATE OR REPLACE VIEW v_trades AS
+            SELECT
+                timestamp,
+                market_id,
+                maker,
+                taker,
+                nonusdc_side,
+                maker_direction,
+                taker_direction,
+                price,
+                usd_amount,
+                token_amount,
+                transaction_hash
+            FROM {trades_source}
+        """,
+        "v_order_filled": f"""
+            CREATE OR REPLACE VIEW v_order_filled AS
+            SELECT
+                timestamp,
+                maker,
+                maker_asset_id,
+                maker_amount_filled,
+                taker,
+                taker_asset_id,
+                taker_amount_filled,
+                transaction_hash
+            FROM read_parquet('{parquet_dir}/order_filled.parquet')
+        """,
+        "v_trades_with_markets": """
+            CREATE OR REPLACE VIEW v_trades_with_markets AS
+            SELECT
+                t.timestamp,
+                t.market_id,
+                t.maker,
+                t.taker,
+                t.nonusdc_side,
+                t.maker_direction,
+                t.taker_direction,
+                t.price,
+                t.usd_amount,
+                t.token_amount,
+                t.transaction_hash,
+                m.question,
+                m.category,
+                m.closed_time,
+                -- Derived field: days to expiry
+                CASE
+                    WHEN m.closed_time IS NOT NULL
+                    THEN EXTRACT(EPOCH FROM (m.closed_time - t.timestamp)) / 86400.0
+                    ELSE NULL
+                END AS days_to_exp
+            FROM v_trades t
+            LEFT JOIN v_markets m ON t.market_id = m.id
+        """,
+    }
 
 
 class DuckDBLayer:
     """DuckDB layer for querying Parquet files with pre-defined views."""
 
-    def __init__(self, db_path: Path, parquet_dir: Path) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        parquet_dir: Path,
+        partitioned: bool = False,
+    ) -> None:
         self.db_path = db_path
         self.parquet_dir = parquet_dir
+        self.partitioned = partitioned
         self._conn: duckdb.DuckDBPyConnection | None = None
 
     @property
@@ -116,18 +140,19 @@ class DuckDBLayer:
         created_views: list[str] = []
         parquet_dir_str = str(self.parquet_dir.absolute())
 
-        for view_name, view_sql in VIEW_DEFINITIONS.items():
-            sql = view_sql.format(parquet_dir=parquet_dir_str)
-            self.conn.execute(sql)
+        view_definitions = get_view_definitions(parquet_dir_str, self.partitioned)
+        for view_name, view_sql in view_definitions.items():
+            self.conn.execute(view_sql)
             created_views.append(view_name)
-            logger.info("view_created", view=view_name)
+            logger.info("view_created", view=view_name, partitioned=self.partitioned)
 
         return created_views
 
     def verify_views(self) -> dict[str, int]:
         """Verify all views are queryable and return row counts."""
         counts: dict[str, int] = {}
-        for view_name in VIEW_DEFINITIONS:
+        view_names = ["v_markets", "v_trades", "v_order_filled", "v_trades_with_markets"]
+        for view_name in view_names:
             result = self.conn.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()
             counts[view_name] = result[0] if result else 0
             logger.info("view_verified", view=view_name, rows=counts[view_name])
@@ -351,3 +376,31 @@ class DuckDBLayer:
         trades = [dict(zip(columns, row)) for row in result.fetchall()]
 
         return trades, total_count
+
+    def explain_query(
+        self,
+        sql: str,
+        params: list[Any] | None = None,
+        analyze: bool = False,
+    ) -> str:
+        """
+        Get the query execution plan.
+
+        Args:
+            sql: The SQL query to explain
+            params: Query parameters
+            analyze: If True, use EXPLAIN ANALYZE (actually run query)
+
+        Returns:
+            The query plan as a string
+        """
+        explain_cmd = "EXPLAIN ANALYZE" if analyze else "EXPLAIN"
+        explain_sql = f"{explain_cmd} {sql}"
+
+        if params:
+            result = self.conn.execute(explain_sql, params)
+        else:
+            result = self.conn.execute(explain_sql)
+
+        rows = result.fetchall()
+        return "\n".join(str(row[0]) for row in rows)

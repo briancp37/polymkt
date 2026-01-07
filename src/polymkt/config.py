@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     parquet_compression: str = "zstd"
     parquet_row_group_size: int = 100_000
 
+    # Partitioning settings
+    parquet_partitioning_enabled: bool = False  # Set True to enable year/month/day/hash_bucket partitioning
+    parquet_hash_bucket_count: int = 8  # Number of hash buckets for market_id
+
     # API settings
     api_host: str = "0.0.0.0"
     api_port: int = 8000
