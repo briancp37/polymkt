@@ -89,3 +89,6 @@ class BootstrapSummary(BaseModel):
     order_filled_rows: int
     schema_version: str
     parquet_files: list[str]
+    rows_quarantined: dict[str, int] = Field(
+        default_factory=dict, description="Rows quarantined per entity due to validation errors"
+    )

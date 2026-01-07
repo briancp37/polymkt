@@ -11,6 +11,12 @@ import structlog
 
 from polymkt.config import settings
 from polymkt.models.schemas import BootstrapSummary, RunRecord
+from polymkt.pipeline.normalize import (
+    ValidationResult,
+    validate_and_normalize_markets,
+    validate_and_normalize_order_filled,
+    validate_and_normalize_trades,
+)
 from polymkt.storage.duckdb_layer import DuckDBLayer
 from polymkt.storage.metadata import MetadataStore
 from polymkt.storage.parquet import (
@@ -110,12 +116,27 @@ def run_bootstrap(
     parquet_dir: Path | None = None,
     duckdb_path: Path | None = None,
     metadata_db_path: Path | None = None,
+    normalize_addresses: bool = True,
+    validate_data: bool = True,
 ) -> BootstrapSummary:
     """
     Run the bootstrap import process.
 
     Reads existing CSV files and converts them to Parquet format,
     then creates DuckDB views over the Parquet files.
+
+    Args:
+        markets_csv: Path to markets CSV file
+        trades_csv: Path to trades CSV file
+        order_filled_csv: Path to orderFilled CSV file
+        parquet_dir: Directory for Parquet output
+        duckdb_path: Path to DuckDB database file
+        metadata_db_path: Path to metadata SQLite database
+        normalize_addresses: Whether to normalize Ethereum addresses (lowercase 0x)
+        validate_data: Whether to validate and quarantine invalid rows
+
+    Returns:
+        BootstrapSummary with run details including any validation issues
     """
     # Use settings defaults if not provided
     markets_csv = markets_csv or settings.markets_csv
@@ -146,6 +167,8 @@ def run_bootstrap(
     parquet_files: list[str] = []
     rows_read: dict[str, int] = {}
     rows_written: dict[str, int] = {}
+    rows_quarantined: dict[str, int] = {}
+    validation_results: dict[str, ValidationResult] = {}
 
     try:
         # Process markets
@@ -155,6 +178,13 @@ def run_bootstrap(
                 markets_csv, MARKETS_SCHEMA, MARKETS_COLUMN_MAPPING
             )
             rows_read["markets"] = markets_table.num_rows
+
+            if validate_data:
+                markets_validation = validate_and_normalize_markets(markets_table)
+                validation_results["markets"] = markets_validation
+                markets_table = markets_validation.valid_table
+                rows_quarantined["markets"] = markets_validation.rows_quarantined
+
             output_path = parquet_writer.write_markets(markets_table)
             rows_written["markets"] = markets_table.num_rows
             parquet_files.append(str(output_path))
@@ -162,6 +192,7 @@ def run_bootstrap(
             logger.warning("csv_not_found", path=str(markets_csv))
             rows_read["markets"] = 0
             rows_written["markets"] = 0
+            rows_quarantined["markets"] = 0
 
         # Process trades
         if trades_csv.exists():
@@ -170,6 +201,15 @@ def run_bootstrap(
                 trades_csv, TRADES_SCHEMA, TRADES_COLUMN_MAPPING
             )
             rows_read["trades"] = trades_table.num_rows
+
+            if validate_data:
+                trades_validation = validate_and_normalize_trades(
+                    trades_table, normalize_addresses=normalize_addresses
+                )
+                validation_results["trades"] = trades_validation
+                trades_table = trades_validation.valid_table
+                rows_quarantined["trades"] = trades_validation.rows_quarantined
+
             output_path = parquet_writer.write_trades(trades_table)
             rows_written["trades"] = trades_table.num_rows
             parquet_files.append(str(output_path))
@@ -177,6 +217,7 @@ def run_bootstrap(
             logger.warning("csv_not_found", path=str(trades_csv))
             rows_read["trades"] = 0
             rows_written["trades"] = 0
+            rows_quarantined["trades"] = 0
 
         # Process order filled
         if order_filled_csv.exists():
@@ -185,6 +226,15 @@ def run_bootstrap(
                 order_filled_csv, ORDER_FILLED_SCHEMA, ORDER_FILLED_COLUMN_MAPPING
             )
             rows_read["order_filled"] = order_filled_table.num_rows
+
+            if validate_data:
+                order_filled_validation = validate_and_normalize_order_filled(
+                    order_filled_table, normalize_addresses=normalize_addresses
+                )
+                validation_results["order_filled"] = order_filled_validation
+                order_filled_table = order_filled_validation.valid_table
+                rows_quarantined["order_filled"] = order_filled_validation.rows_quarantined
+
             output_path = parquet_writer.write_order_filled(order_filled_table)
             rows_written["order_filled"] = order_filled_table.num_rows
             parquet_files.append(str(output_path))
@@ -192,6 +242,7 @@ def run_bootstrap(
             logger.warning("csv_not_found", path=str(order_filled_csv))
             rows_read["order_filled"] = 0
             rows_written["order_filled"] = 0
+            rows_quarantined["order_filled"] = 0
 
         # Create DuckDB views
         logger.info("creating_duckdb_views")
@@ -225,12 +276,23 @@ def run_bootstrap(
                 "order_filled", {"bootstrap_completed": end_time.isoformat()}
             )
 
+        # Log quarantine summary if any rows were quarantined
+        total_quarantined = sum(rows_quarantined.values())
+        if total_quarantined > 0:
+            logger.warning(
+                "bootstrap_rows_quarantined",
+                run_id=run_id,
+                rows_quarantined=rows_quarantined,
+                total_quarantined=total_quarantined,
+            )
+
         logger.info(
             "bootstrap_completed",
             run_id=run_id,
             duration_seconds=duration,
             rows_read=rows_read,
             rows_written=rows_written,
+            rows_quarantined=rows_quarantined,
         )
 
         return BootstrapSummary(
@@ -242,6 +304,7 @@ def run_bootstrap(
             order_filled_rows=rows_written.get("order_filled", 0),
             schema_version="1.0.0",
             parquet_files=parquet_files,
+            rows_quarantined=rows_quarantined,
         )
 
     except Exception as e:

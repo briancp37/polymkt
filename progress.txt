@@ -51,3 +51,51 @@ Type checking passes with mypy.
 - Implement incremental updates with watermark-based fetching
 - Add Parquet partitioning for query optimization
 - Implement the search indices (BM25 + vector search)
+
+---
+
+## 2026-01-06: Field Normalization and Validation Feature
+
+### What was done:
+Implemented comprehensive field normalization and validation for the bootstrap import pipeline, ensuring data quality and consistency.
+
+### Features implemented:
+1. **Normalization module** (`src/polymkt/pipeline/normalize.py`)
+   - `normalize_address()` - Normalizes Ethereum addresses to lowercase with 0x prefix
+   - `normalize_timestamp()` - Normalizes timestamps to UTC datetime, supporting multiple formats
+   - `normalize_numeric()` - Validates numeric fields with optional min/max bounds
+   - `ValidationResult` dataclass to track valid rows vs quarantined rows
+
+2. **Entity-specific validation functions**
+   - `validate_and_normalize_trades()` - Validates trades with price bounds (0-1), required fields, address normalization
+   - `validate_and_normalize_markets()` - Validates markets with required id/question fields
+   - `validate_and_normalize_order_filled()` - Validates order events with required timestamp/hash
+
+3. **Bootstrap pipeline integration**
+   - Added `validate_data` and `normalize_addresses` parameters to `run_bootstrap()`
+   - Invalid rows are quarantined (not written to Parquet) with clear error logs
+   - `BootstrapSummary` now includes `rows_quarantined` counts per entity
+   - Structured logging for validation errors with sample messages
+
+4. **Edge case handling**
+   - Bad timestamps: Invalid formats are rejected with clear error messages
+   - Missing required fields: Rows quarantined with field-specific errors
+   - Invalid prices: Values outside 0-1 range are quarantined
+   - Invalid addresses: Non-hex or wrong-length addresses normalized to None
+   - NaN/Infinity values: Rejected with clear logs
+
+### PRD features marked as passing:
+- Normalize and type-cast fields consistently (timestamps, numerics, addresses, directions)
+
+### Tests:
+50 tests passing (38 new tests for normalization module).
+- Unit tests for `normalize_address`, `normalize_timestamp`, `normalize_numeric`
+- Integration tests for entity validation functions
+- End-to-end test with bootstrap pipeline and edge cases
+
+### Next steps for future sessions:
+- Implement schema validation for custom columns (category, closedTime, tags) - events join
+- Implement incremental updates with watermark-based fetching
+- Add Parquet partitioning for query optimization
+- Implement the search indices (BM25 + vector search)
+- Query interface enhancements (stable ordering option)

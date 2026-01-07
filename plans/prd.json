@@ -71,7 +71,7 @@
         "Verify maker/taker fields are normalized (lowercase/0x formatting) if configured",
         "Verify invalid rows are either quarantined or rejected with clear error logs"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "functional",
