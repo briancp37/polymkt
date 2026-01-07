@@ -352,7 +352,7 @@
           "Regenerate embeddings only for changed/new/affected markets",
           "Verify BM25 and vector indices reflect the changes"
         ],
-        "passes": false
+        "passes": true
     },
     {
       "category": "UX",

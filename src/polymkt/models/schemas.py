@@ -238,14 +238,23 @@ class SearchIndexUpdateResult(BaseModel):
     new_markets: int = Field(0, description="Number of new markets detected")
     changed_markets: int = Field(0, description="Number of changed markets detected")
     deleted_markets: int = Field(0, description="Number of deleted markets detected")
+    new_events: int = Field(0, description="Number of new events detected")
+    changed_events: int = Field(0, description="Number of changed events detected")
+    deleted_events: int = Field(0, description="Number of deleted events detected")
+    event_affected_markets: int = Field(
+        0, description="Number of markets updated due to event tag changes"
+    )
 
 
 class SearchIndexUpdaterStats(BaseModel):
     """Statistics about the search index updater."""
 
-    total_hashes: int = Field(0, description="Total content hashes tracked")
-    first_updated: datetime | None = Field(None, description="First hash update time")
-    last_updated: datetime | None = Field(None, description="Last hash update time")
+    total_hashes: int = Field(0, description="Total market content hashes tracked")
+    first_updated: datetime | None = Field(None, description="First market hash update time")
+    last_updated: datetime | None = Field(None, description="Last market hash update time")
+    total_event_hashes: int = Field(0, description="Total event content hashes tracked")
+    event_first_updated: datetime | None = Field(None, description="First event hash update time")
+    event_last_updated: datetime | None = Field(None, description="Last event hash update time")
     bm25_available: bool = Field(..., description="Whether BM25 index is available")
     semantic_available: bool = Field(..., description="Whether semantic index is available")
     bm25_markets_indexed: int | None = Field(None, description="Markets in BM25 index")

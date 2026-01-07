@@ -1087,3 +1087,90 @@ Implemented the unified Markets Search API endpoint that supports multiple searc
 - Implement backtest v1: buy favorite at 90 days to expiry
 - Implement datasets and backtests persistence
 - Implement poly_data integration for live updates
+
+---
+
+## 2026-01-07: Event Change Detection for Search Index Updates
+
+### What was done:
+Implemented event change detection in the incremental search index updater, enabling detection of changed event tags and automatic updating of affected markets in the search indices.
+
+### Features implemented:
+1. **Event content hash tracking** (`src/polymkt/storage/search_index_updater.py`)
+   - `compute_event_content_hash()` - Computes MD5 hash of event tags
+   - `event_content_hashes` table stores hashes keyed by event_id
+   - `_get_stored_event_hashes()` and `_compute_current_event_hashes()` methods
+   - `detect_changed_events()` - Identifies new, changed, and deleted events
+
+2. **Market-to-event linking**
+   - `_get_markets_for_events()` - Finds markets linked to changed events via event_id
+   - Deduplication ensures markets aren't updated twice (direct change + event change)
+   - `event_affected_markets` stat tracks markets updated due to event changes only
+
+3. **Updated `update_indices()` method**
+   - Detects both market and event changes in a single pass
+   - Finds markets affected by event tag changes
+   - Combines all affected markets (deduplicated) for index update
+   - Updates both market and event content hashes after processing
+   - Returns comprehensive stats including event-related metrics
+
+4. **API endpoint updates** (`src/polymkt/api/main.py`)
+   - `POST /api/search-index/update` now returns event change statistics
+   - `GET /api/search-index/stats` now returns event hash tracking statistics
+
+5. **Schema updates** (`src/polymkt/models/schemas.py`)
+   - `SearchIndexUpdateResult` - Added new_events, changed_events, deleted_events, event_affected_markets
+   - `SearchIndexUpdaterStats` - Added total_event_hashes, event_first_updated, event_last_updated
+
+### PRD requirements met:
+- Run an incremental update that adds or modifies markets and events tags ✓
+- Detect which events changed (by hash of tags) ✓
+- Identify affected markets for embedding refresh via event linkage ✓
+- Regenerate embeddings only for changed/new/affected markets ✓
+- Verify BM25 and vector indices reflect the changes ✓
+
+### Tests added (`tests/test_event_search_update.py`):
+308 tests total (21 new tests for event change detection).
+
+**TestComputeEventContentHash (6 tests):**
+- `test_hash_with_tags`: Hash computation with tags
+- `test_hash_deterministic`: Deterministic hash for same tags
+- `test_hash_different_for_different_tags`: Different tags produce different hashes
+- `test_hash_tags_order_independent`: Tags sorted for consistent hash
+- `test_hash_with_none_tags`: Handles None tags
+- `test_hash_with_empty_tags`: Empty list equals None
+
+**TestEventChangeDetection (3 tests):**
+- `test_detect_new_events`: Detection of new events
+- `test_no_changes_after_initial_update`: No changes after first build
+- `test_check_events_available_with_events`: Events availability check
+
+**TestGetMarketsForEvents (4 tests):**
+- `test_get_markets_for_single_event`: Single event to markets lookup
+- `test_get_markets_for_multiple_events`: Multiple events to markets lookup
+- `test_get_markets_for_empty_events`: Empty list handling
+- `test_get_markets_for_nonexistent_event`: Nonexistent event handling
+
+**TestUpdateIndicesWithEvents (4 tests):**
+- `test_force_rebuild_stores_event_hashes`: Force rebuild stores hashes
+- `test_incremental_update_detects_event_changes`: Event detection works
+- `test_incremental_update_includes_event_affected_markets`: Affected markets included
+- `test_no_changes_returns_correct_result`: No changes scenario
+
+**TestSearchIndexUpdaterStats (2 tests):**
+- `test_stats_includes_event_hashes`: Stats include event hashes
+- `test_stats_empty_when_no_index`: Empty stats before build
+
+**TestAPIEventSearchUpdate (2 tests):**
+- `test_api_update_returns_event_fields`: API returns event fields
+- `test_api_stats_returns_event_hash_fields`: API stats include event fields
+
+### PRD features marked as passing:
+- Incremental updates: new/changed markets and events update the search indices without full rebuild
+
+### Next steps for future sessions:
+- Implement election group concept for "buy the favorite" backtests
+- Implement backtest v1: buy favorite at 90 days to expiry
+- Implement datasets and backtests persistence
+- Implement poly_data integration for live updates
+- Implement API endpoints for dataset CRUD and backtest execution

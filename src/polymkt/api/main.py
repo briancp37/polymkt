@@ -963,14 +963,18 @@ def update_search_indices(
     force_rebuild: bool = False,
 ) -> SearchIndexUpdateResult:
     """
-    Update search indices incrementally based on changed markets.
+    Update search indices incrementally based on changed markets and events.
 
     This endpoint detects which markets have changed (new, modified, or deleted)
-    by comparing content hashes of question + tags + description, and updates
-    only the affected markets in both BM25 and semantic indices.
+    by comparing content hashes of question + tags + description, and also detects
+    event tag changes that affect market search indexing.
+
+    Markets are updated in both BM25 and semantic indices when:
+    - The market's own content (question, description) changes
+    - The event's tags change (which affects the market's derived tags)
 
     This is more efficient than rebuilding the entire index when only a few
-    markets have changed.
+    markets or events have changed.
 
     Args:
         force_rebuild: If True, rebuild all indices from scratch instead of
@@ -978,7 +982,7 @@ def update_search_indices(
                       are corrupted or out of sync.
 
     Returns:
-        Update statistics including number of markets updated in each index.
+        Update statistics including number of markets and events updated.
     """
     if not (settings.parquet_dir / "markets.parquet").exists():
         raise HTTPException(
@@ -1005,9 +1009,14 @@ def update_search_indices(
 
         # Determine status based on results
         total_updated = bm25_count + semantic_count
+        has_event_changes = (
+            result.get("new_events", 0) > 0
+            or result.get("changed_events", 0) > 0
+            or result.get("deleted_events", 0) > 0
+        )
         if result["mode"] == "full_rebuild":
             status = "success"
-        elif total_updated > 0:
+        elif total_updated > 0 or has_event_changes:
             status = "success"
         else:
             status = "no_changes"
@@ -1020,6 +1029,10 @@ def update_search_indices(
             new_markets=result.get("new_markets", 0),
             changed_markets=result.get("changed_markets", 0),
             deleted_markets=result.get("deleted_markets", 0),
+            new_events=result.get("new_events", 0),
+            changed_events=result.get("changed_events", 0),
+            deleted_events=result.get("deleted_events", 0),
+            event_affected_markets=result.get("event_affected_markets", 0),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update search indices: {e}")
@@ -1032,8 +1045,8 @@ def get_search_index_updater_stats() -> SearchIndexUpdaterStats:
     """
     Get statistics about the search index updater.
 
-    Returns information about content hash tracking and both BM25 and semantic
-    search indices.
+    Returns information about content hash tracking for both markets and events,
+    as well as BM25 and semantic search index statistics.
     """
     if not (settings.parquet_dir / "markets.parquet").exists():
         raise HTTPException(
@@ -1058,6 +1071,9 @@ def get_search_index_updater_stats() -> SearchIndexUpdaterStats:
             total_hashes=stats.get("total_hashes", 0),
             first_updated=stats.get("first_updated"),
             last_updated=stats.get("last_updated"),
+            total_event_hashes=stats.get("total_event_hashes", 0),
+            event_first_updated=stats.get("event_first_updated"),
+            event_last_updated=stats.get("event_last_updated"),
             bm25_available=stats.get("bm25_available", False),
             semantic_available=stats.get("semantic_available", False),
             bm25_markets_indexed=stats.get("bm25_markets_indexed"),
