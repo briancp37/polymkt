@@ -1780,3 +1780,87 @@ Type checking passes with mypy (0 issues in 26 source files).
 - Implement Backtesting Agent (natural language strategy requests)
 - Implement React frontend for datasets/backtests UX
 - Implement nonfunctional features (cost efficiency, performance, reliability)
+
+---
+
+## 2026-01-07: Poly_data Integration Feature
+
+### What was done:
+Implemented the poly_data integration feature that adds events update support to the incremental update pipeline, enabling live updates of event tags with automatic refresh of market tags via the events join.
+
+### Features implemented:
+1. **Events update module** (`src/polymkt/pipeline/update.py`)
+   - `_read_events_csv()` - Reads events CSV with special JSON tags parsing
+   - `_get_existing_event_ids()` - Gets existing event IDs from Parquet for deduplication
+   - `_deduplicate_events()` - Separates new vs. updated events
+   - `_upsert_events_parquet()` - Upserts events using DuckDB in-memory operations
+   - `_join_events_tags_to_markets()` - Re-joins events to markets to refresh tags while preserving category and closedTime
+
+2. **Integration with run_update()**
+   - Added `events_csv` parameter for events CSV path
+   - Events processed after trades, markets, and order_filled
+   - Uses watermark-based filtering for incremental fetches
+   - Validates events data before processing
+   - Triggers market tags refresh when events are updated
+   - Sets events watermark for resumable updates
+
+3. **Market tags refresh logic**
+   - When events are updated (new or changed), markets.tags is refreshed via LEFT JOIN
+   - Markets' category and closedTime are preserved during the join
+   - Unmapped markets (with event_id but no matching event) get empty tags []
+   - Warning logged for unmapped markets
+
+4. **Column mapping fix**
+   - Added `eventId -> event_id` mapping to MARKETS_COLUMN_MAPPING in update.py
+   - Ensures markets update correctly processes eventId from CSV
+
+### PRD requirements met:
+- Run the pipeline using poly_data-derived update/fetch components for markets/orderFilled/trades ✓
+- Add an events fetch/update module modeled after poly_data/poly_utils/update_markets to retrieve event tags ✓
+- Verify events tags are stored and joined onto markets deterministically ✓
+- Verify markets updates preserve/refresh category and closedTime, and tags are refreshed via the events join ✓
+- Verify final outputs are Parquet (not CSV) and partitioned per configuration ✓
+- Verify the pipeline is resumable after an interrupted run ✓
+
+### Tests added (`tests/test_poly_data_integration.py`):
+492 tests total (11 new tests for poly_data integration).
+
+**TestEventsUpdateModule (3 tests):**
+- `test_events_update_adds_new_events`: New events are added to Parquet
+- `test_events_update_updates_existing_events`: Existing events with changed tags are upserted
+- `test_events_update_advances_watermark`: Events watermark is updated
+
+**TestEventTagsJoinDeterminism (1 test):**
+- `test_events_tags_joined_to_markets_deterministically`: Tags join is deterministic across multiple runs
+
+**TestMarketsPreserveCategoryClosedTimeRefreshTags (2 tests):**
+- `test_markets_updates_preserve_category_and_closed_time`: Category and closedTime preserved
+- `test_markets_tags_refreshed_via_events_join`: Tags refreshed when events change
+
+**TestParquetOutputAndPartitioning (2 tests):**
+- `test_outputs_are_parquet_not_csv`: All outputs are Parquet format
+- `test_partitioned_output_when_enabled`: Trades partitioned when enabled
+
+**TestPipelineResumability (2 tests):**
+- `test_pipeline_is_resumable_after_interruption`: Pipeline resumes without duplicating data
+- `test_no_duplicates_after_resume`: No duplicates in events, markets, or trades
+
+**TestDuckDBViewsWithEvents (1 test):**
+- `test_duckdb_views_reflect_event_updates`: DuckDB views show updated market tags
+
+### PRD features marked as passing:
+- Integrate poly_data repo logic where possible (incremental fetch, processing, resumability) with custom Parquet output and event-derived tags support
+
+### Notes for next person:
+- The events update module mirrors the pattern in poly_data/poly_utils/update_markets
+- Events are upserted (not just appended) to handle tag updates
+- Market tags refresh only happens when events are actually updated (new or changed)
+- The pipeline is fully resumable - watermarks ensure no duplicates on re-run
+- All outputs are Parquet with ZSTD compression
+- Partitioning is config-driven via `parquet_partitioning_enabled`
+
+### Next steps for future sessions:
+- Implement Dataset Agent (natural language filters)
+- Implement Backtesting Agent (natural language strategy requests)
+- Implement React frontend for datasets/backtests UX
+- Implement nonfunctional features (cost efficiency, performance, reliability)

@@ -278,7 +278,7 @@
           "Verify final outputs are Parquet (not CSV) and partitioned per configuration",
           "Verify the pipeline is resumable after an interrupted run"
         ],
-        "passes": false
+        "passes": true
     },
     {
         "category": "functional",

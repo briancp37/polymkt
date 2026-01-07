@@ -1,9 +1,19 @@
-"""Incremental update pipeline for appending new data since the last watermark."""
+"""Incremental update pipeline for appending new data since the last watermark.
 
+This module implements poly_data-like incremental update logic:
+- Watermark-based filtering to fetch only new data
+- Deduplication using transaction_hash for trades/orders
+- Upsert logic for markets with events tag refresh
+- Events update module for refreshing event tags
+- Resumable pipeline that can recover from interruption
+"""
+
+import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 
 import duckdb
 import pyarrow as pa
@@ -14,6 +24,8 @@ import structlog
 from polymkt.config import settings
 from polymkt.models.schemas import RunRecord, UpdateSummary
 from polymkt.pipeline.normalize import (
+    normalize_timestamp,
+    validate_and_normalize_events,
     validate_and_normalize_markets,
     validate_and_normalize_order_filled,
     validate_and_normalize_trades,
@@ -21,6 +33,7 @@ from polymkt.pipeline.normalize import (
 from polymkt.storage.duckdb_layer import DuckDBLayer
 from polymkt.storage.metadata import MetadataStore
 from polymkt.storage.parquet import (
+    EVENTS_SCHEMA,
     MARKETS_SCHEMA,
     ORDER_FILLED_SCHEMA,
     TRADES_SCHEMA,
@@ -32,6 +45,7 @@ logger = structlog.get_logger()
 MARKETS_COLUMN_MAPPING = {
     "createdAt": "created_at",
     "closedTime": "closed_time",
+    "eventId": "event_id",
 }
 
 TRADES_COLUMN_MAPPING = {
@@ -44,6 +58,11 @@ ORDER_FILLED_COLUMN_MAPPING = {
     "takerAssetId": "taker_asset_id",
     "takerAmountFilled": "taker_amount_filled",
     "transactionHash": "transaction_hash",
+}
+
+EVENTS_COLUMN_MAPPING = {
+    "eventId": "event_id",
+    "createdAt": "created_at",
 }
 
 
@@ -397,10 +416,281 @@ def _get_max_timestamp(table: pa.Table, timestamp_column: str = "timestamp") -> 
     return str(max_ts.isoformat())
 
 
+def _get_existing_event_ids(parquet_path: Path) -> set[str]:
+    """Get set of existing event IDs from a Parquet file."""
+    if not parquet_path.exists():
+        return set()
+
+    table = pq.read_table(parquet_path, columns=["event_id"])
+    return set(table.column("event_id").to_pylist())
+
+
+def _read_events_csv(csv_path: Path) -> pa.Table:
+    """
+    Read events CSV with special handling for tags column (JSON list).
+
+    Events CSV format expected:
+    eventId,tags,title,description,createdAt
+    evt_123,"[""tag1"",""tag2""]",My Event,Description,2025-01-01 00:00:00
+
+    This is modeled after poly_data/poly_utils/update_markets for event retrieval.
+    """
+    logger.info("reading_events_csv", path=str(csv_path))
+
+    # Read CSV as strings first
+    table = csv.read_csv(csv_path)
+    logger.info(
+        "events_csv_read",
+        path=str(csv_path),
+        rows=table.num_rows,
+        columns=table.column_names,
+    )
+
+    # Rename columns
+    table = _rename_columns(table, EVENTS_COLUMN_MAPPING)
+
+    rows = table.to_pylist()
+    processed_rows: list[dict[str, Any]] = []
+
+    for row in rows:
+        processed_row = dict(row)
+
+        # Parse tags from JSON string if present
+        tags_value = row.get("tags")
+        if tags_value is None or tags_value == "":
+            processed_row["tags"] = []
+        elif isinstance(tags_value, str):
+            try:
+                parsed_tags = json.loads(tags_value)
+                if isinstance(parsed_tags, list):
+                    processed_row["tags"] = [str(t) for t in parsed_tags]
+                else:
+                    processed_row["tags"] = [str(parsed_tags)]
+            except json.JSONDecodeError:
+                # If not valid JSON, treat as a single tag or comma-separated
+                if "," in tags_value:
+                    processed_row["tags"] = [t.strip() for t in tags_value.split(",")]
+                else:
+                    processed_row["tags"] = [tags_value]
+        elif isinstance(tags_value, list):
+            processed_row["tags"] = [str(t) for t in tags_value]
+        else:
+            processed_row["tags"] = []
+
+        # Parse created_at timestamp
+        processed_row["created_at"] = normalize_timestamp(
+            row.get("created_at"), "created_at"
+        )
+
+        processed_rows.append(processed_row)
+
+    # Build PyArrow table with proper schema
+    return pa.Table.from_pylist(processed_rows, schema=EVENTS_SCHEMA)
+
+
+def _deduplicate_events(
+    new_table: pa.Table,
+    existing_ids: set[str],
+) -> tuple[pa.Table, pa.Table, int]:
+    """
+    Separate events into new and updates based on existing IDs.
+
+    Returns:
+        Tuple of (new events table, updated events table, num_updates)
+    """
+    if new_table.num_rows == 0:
+        return new_table, _create_empty_table_like(new_table), 0
+
+    if not existing_ids:
+        return new_table, _create_empty_table_like(new_table), 0
+
+    # Create masks
+    ids = new_table.column("event_id").to_pylist()
+    is_new = [id not in existing_ids for id in ids]
+    is_update = [id in existing_ids for id in ids]
+
+    # Count updates
+    num_updates = sum(is_update)
+
+    # Filter using masks (explicitly typed as boolean)
+    new_events = new_table.filter(pa.array(is_new, type=pa.bool_()))
+    updated_events = new_table.filter(pa.array(is_update, type=pa.bool_()))
+
+    if num_updates > 0:
+        logger.info("events_updates_detected", count=num_updates)
+
+    return new_events, updated_events, num_updates
+
+
+def _upsert_events_parquet(
+    existing_path: Path,
+    new_events: pa.Table,
+    updated_events: pa.Table,
+) -> int:
+    """
+    Upsert events: add new events and update existing ones.
+
+    Uses DuckDB to efficiently handle the upsert logic.
+    Returns number of rows written (new + updated).
+    """
+    total_new = new_events.num_rows if new_events else 0
+    total_updates = updated_events.num_rows if updated_events else 0
+
+    if total_new == 0 and total_updates == 0:
+        return 0
+
+    if not existing_path.exists():
+        # Just write new events
+        if total_new > 0:
+            new_events = new_events.cast(EVENTS_SCHEMA)
+            pq.write_table(new_events, existing_path, compression="zstd")
+        return total_new
+
+    # Use DuckDB for efficient upsert
+    conn = duckdb.connect(":memory:")
+
+    try:
+        # Load existing events
+        existing_table = pq.read_table(existing_path)
+        conn.register("existing_events", existing_table)
+
+        if total_updates > 0:
+            # Register updated events
+            conn.register("updated_events", updated_events)
+
+            # Create merged table: updates replace existing by event_id
+            conn.execute("""
+                CREATE TABLE merged AS
+                SELECT * FROM existing_events e
+                WHERE e.event_id NOT IN (SELECT event_id FROM updated_events)
+                UNION ALL
+                SELECT * FROM updated_events
+            """)
+        else:
+            conn.execute("CREATE TABLE merged AS SELECT * FROM existing_events")
+
+        # Add new events if any
+        if total_new > 0:
+            conn.register("new_events", new_events)
+            conn.execute("INSERT INTO merged SELECT * FROM new_events")
+
+        # Export to Parquet
+        result = conn.execute("SELECT * FROM merged").fetch_arrow_table()
+        result = result.cast(EVENTS_SCHEMA)
+        pq.write_table(result, existing_path, compression="zstd")
+
+        logger.info(
+            "events_upserted",
+            path=str(existing_path),
+            existing_rows=existing_table.num_rows,
+            new_rows=total_new,
+            updated_rows=total_updates,
+            final_rows=result.num_rows,
+        )
+
+    finally:
+        conn.close()
+
+    return total_new + total_updates
+
+
+def _join_events_tags_to_markets(
+    markets_parquet: Path,
+    events_parquet: Path,
+) -> int:
+    """
+    Re-join event tags to markets via event_id, refreshing market tags.
+
+    This is called after events are updated to propagate tag changes to markets.
+    Markets' category and closedTime are preserved while tags are refreshed.
+
+    Returns number of markets updated.
+    """
+    if not markets_parquet.exists() or not events_parquet.exists():
+        logger.info(
+            "skip_events_join_missing_files",
+            markets_exists=markets_parquet.exists(),
+            events_exists=events_parquet.exists(),
+        )
+        return 0
+
+    logger.info(
+        "refreshing_market_tags_from_events",
+        markets_path=str(markets_parquet),
+        events_path=str(events_parquet),
+    )
+
+    # Use DuckDB in-memory for efficient join
+    conn = duckdb.connect(":memory:")
+
+    try:
+        # Load tables
+        markets_table = pq.read_table(markets_parquet)
+        events_table = pq.read_table(events_parquet)
+
+        conn.register("markets", markets_table)
+        conn.register("events", events_table)
+
+        # Left join markets to events to get refreshed tags
+        # Preserves category, closed_time, and all other market fields
+        result = conn.execute("""
+            SELECT
+                m.id,
+                m.question,
+                m.created_at,
+                m.answer1,
+                m.answer2,
+                m.neg_risk,
+                m.market_slug,
+                m.token1,
+                m.token2,
+                m.condition_id,
+                m.volume,
+                m.ticker,
+                m.closed_time,
+                m.description,
+                m.category,
+                m.event_id,
+                COALESCE(e.tags, []) AS tags
+            FROM markets m
+            LEFT JOIN events e ON m.event_id = e.event_id
+        """).fetch_arrow_table()
+
+        # Log unmapped markets
+        unmapped_result = conn.execute("""
+            SELECT COUNT(*) as cnt FROM markets m
+            WHERE m.event_id IS NOT NULL
+            AND m.event_id NOT IN (SELECT event_id FROM events)
+        """).fetchone()
+        unmapped_count: int = int(unmapped_result[0]) if unmapped_result else 0
+
+        if unmapped_count > 0:
+            logger.warning(
+                "markets_with_unmapped_events",
+                unmapped_count=unmapped_count,
+            )
+
+        # Write updated markets back to Parquet
+        result = result.cast(MARKETS_SCHEMA)
+        pq.write_table(result, markets_parquet, compression="zstd")
+
+        logger.info(
+            "events_tags_refresh_complete",
+            markets_updated=result.num_rows,
+            unmapped_markets=unmapped_count,
+        )
+
+        return int(result.num_rows)
+
+    finally:
+        conn.close()
+
+
 def run_update(
     markets_csv: Path | None = None,
     trades_csv: Path | None = None,
     order_filled_csv: Path | None = None,
+    events_csv: Path | None = None,
     parquet_dir: Path | None = None,
     duckdb_path: Path | None = None,
     metadata_db_path: Path | None = None,
@@ -410,21 +700,24 @@ def run_update(
     """
     Run an incremental update using the last watermark.
 
-    This pipeline:
+    This pipeline implements poly_data-like incremental update logic:
     1. Reads the current watermark for each entity
-    2. Reads new data from CSVs (simulating an upstream fetch)
+    2. Reads new data from CSVs (simulating an upstream fetch like poly_data)
     3. Filters data to only rows after the watermark timestamp
-    4. Deduplicates using transaction_hash (for trades/order_filled) or id (for markets)
-    5. Appends new rows to Parquet files (or upserts for markets)
-    6. Updates the watermark to the max timestamp of new data
-    7. Updates DuckDB views if needed
+    4. Deduplicates using transaction_hash (for trades/order_filled) or id (for markets/events)
+    5. Appends new rows to Parquet files (or upserts for markets/events)
+    6. Refreshes market tags by re-joining with updated events
+    7. Updates the watermark to the max timestamp of new data
+    8. Updates DuckDB views if needed
 
     The runtime is proportional to new data, not total history.
+    The pipeline is resumable - if interrupted, it can be re-run without duplicating data.
 
     Args:
         markets_csv: Path to markets CSV file
         trades_csv: Path to trades CSV file
         order_filled_csv: Path to orderFilled CSV file
+        events_csv: Path to events CSV file (for updating event tags)
         parquet_dir: Directory for Parquet output
         duckdb_path: Path to DuckDB database file
         metadata_db_path: Path to metadata SQLite database
@@ -438,6 +731,7 @@ def run_update(
     markets_csv = markets_csv or settings.markets_csv
     trades_csv = trades_csv or settings.trades_csv
     order_filled_csv = order_filled_csv or settings.order_filled_csv
+    events_csv = events_csv or settings.events_csv
     parquet_dir = parquet_dir or settings.parquet_dir
     duckdb_path = duckdb_path or settings.duckdb_path
     metadata_db_path = metadata_db_path or settings.metadata_db_path
@@ -630,6 +924,74 @@ def run_update(
             rows_written["order_filled"] = 0
             rows_skipped["order_filled"] = 0
             rows_quarantined["order_filled"] = 0
+
+        # Process events (poly_data-like event tags update)
+        # This is modeled after poly_data/poly_utils/update_markets for event retrieval
+        events_parquet = parquet_dir / "events.parquet"
+        markets_parquet = parquet_dir / "markets.parquet"
+        events_updated = False
+
+        if events_csv.exists():
+            logger.info("processing_events_update", path=str(events_csv))
+
+            # Read events from CSV with special JSON tags handling
+            events_table = _read_events_csv(events_csv)
+            rows_read["events"] = events_table.num_rows
+
+            # Filter by watermark for events using created_at
+            events_watermark = metadata_store.get_watermark("events")
+            events_table = _filter_new_data_by_watermark(
+                events_table, events_watermark, timestamp_column="created_at"
+            )
+
+            # Validate events
+            if validate_data:
+                events_validation = validate_and_normalize_events(events_table)
+                events_table = events_validation.valid_table
+                rows_quarantined["events"] = events_validation.rows_quarantined
+
+            # Separate into new and updates
+            existing_ids = _get_existing_event_ids(events_parquet)
+            new_events, updated_events, num_updates = _deduplicate_events(
+                events_table, existing_ids
+            )
+            rows_skipped["events"] = 0  # Events use upsert, not skip
+            rows_updated["events"] = num_updates
+
+            # Upsert events
+            written = _upsert_events_parquet(
+                events_parquet, new_events, updated_events
+            )
+            rows_written["events"] = new_events.num_rows  # Only count new rows as "written"
+
+            # Mark that events were updated (for market tags refresh)
+            if written > 0 or num_updates > 0:
+                events_updated = True
+
+            # Update watermark
+            if events_table.num_rows > 0:
+                max_ts = _get_max_timestamp(events_table, "created_at")
+                if max_ts:
+                    new_watermark = {"last_timestamp": max_ts}
+                    metadata_store.set_watermark("events", new_watermark)
+                    watermarks_after["events"] = new_watermark
+            elif events_watermark:
+                watermarks_after["events"] = events_watermark
+
+        else:
+            logger.info("events_csv_not_found", path=str(events_csv))
+            rows_read["events"] = 0
+            rows_written["events"] = 0
+            rows_skipped["events"] = 0
+            rows_updated["events"] = 0
+            rows_quarantined["events"] = 0
+
+        # Re-join events tags to markets if events were updated
+        # This ensures markets.tags is refreshed via the events join
+        # Markets' category and closedTime are preserved
+        if events_updated and events_parquet.exists() and markets_parquet.exists():
+            logger.info("refreshing_market_tags_after_events_update")
+            _join_events_tags_to_markets(markets_parquet, events_parquet)
 
         # Refresh DuckDB views if any data was written
         total_written = sum(rows_written.values())
