@@ -891,3 +891,121 @@ class DatasetAgentSaveResultSchema(BaseModel):
     dataset_name: str = Field(..., description="Dataset name")
     market_count: int = Field(..., description="Number of included markets")
     excluded_count: int = Field(..., description="Number of excluded markets")
+
+
+# =============================================================================
+# Backtesting Agent schemas
+# =============================================================================
+
+
+class ParsedStrategySchema(BaseModel):
+    """Parsed strategy configuration from natural language."""
+
+    name: str = Field(..., description="Generated strategy name")
+    entry_days_to_exp: float = Field(..., description="Entry days to expiry")
+    exit_rule: str = Field(..., description="Exit rule (e.g., 'expiry', 'take_profit')")
+    favorite_rule: str = Field(
+        ..., description="Favorite rule (e.g., 'max_yes_price')"
+    )
+    fee_rate: float = Field(..., description="Fee rate (0.0 to 1.0)")
+    slippage_rate: float = Field(..., description="Slippage rate (0.0 to 1.0)")
+    position_size: float = Field(..., description="Position size (0.0 to 1.0)")
+    extra_params: dict[str, Any] | None = Field(
+        None, description="Additional strategy parameters"
+    )
+
+
+class BacktestAgentRequestSchema(BaseModel):
+    """Request for the backtesting agent."""
+
+    dataset_id: str = Field(..., description="Dataset ID to run backtest on")
+    natural_language_strategy: str = Field(
+        ...,
+        min_length=3,
+        max_length=1000,
+        description="Natural language strategy description (e.g., 'buy favorite 90 days out, hold to expiry')",
+    )
+    fee_rate: float | None = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Override fee rate (0.0 to 1.0)",
+    )
+    slippage_rate: float | None = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="Override slippage rate (0.0 to 1.0)",
+    )
+    position_size: float | None = Field(
+        None,
+        gt=0.0,
+        le=1.0,
+        description="Override position size (0.0 to 1.0)",
+    )
+
+
+class StrategyConfirmationSchema(BaseModel):
+    """Confirmation summary of parsed strategy before execution."""
+
+    session_id: str = Field(..., description="Session ID for this preparation")
+    dataset_id: str = Field(..., description="Dataset ID")
+    dataset_name: str = Field(..., description="Dataset name")
+    market_count: int = Field(..., description="Number of markets in dataset")
+    parsed_strategy: ParsedStrategySchema = Field(..., description="Parsed strategy")
+    summary: str = Field(..., description="Human-readable summary of the strategy")
+    warnings: list[str] = Field(
+        default_factory=list, description="Warnings about missing prerequisites"
+    )
+
+
+class BacktestAgentModifyRequestSchema(BaseModel):
+    """Request to modify a prepared strategy."""
+
+    session_id: str = Field(..., description="Session ID from prepare_backtest")
+    entry_days_to_exp: float | None = Field(
+        None,
+        gt=0,
+        description="New entry days to expiry",
+    )
+    exit_rule: str | None = Field(
+        None,
+        description="New exit rule (e.g., 'expiry', 'take_profit', 'stop_loss')",
+    )
+    favorite_rule: str | None = Field(
+        None,
+        description="New favorite rule (e.g., 'max_yes_price', 'min_yes_price')",
+    )
+    fee_rate: float | None = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="New fee rate (0.0 to 1.0)",
+    )
+    slippage_rate: float | None = Field(
+        None,
+        ge=0.0,
+        le=1.0,
+        description="New slippage rate (0.0 to 1.0)",
+    )
+    position_size: float | None = Field(
+        None,
+        gt=0.0,
+        le=1.0,
+        description="New position size (0.0 to 1.0)",
+    )
+
+
+class BacktestAgentResultSchema(BaseModel):
+    """Result of executing a backtest via the agent."""
+
+    backtest_id: str = Field(..., description="Created backtest ID")
+    status: str = Field(..., description="Backtest status ('completed' or 'failed')")
+    metrics: BacktestMetrics | None = Field(None, description="Backtest metrics")
+    trades: list[BacktestTradeRecord] = Field(
+        default_factory=list, description="List of trades"
+    )
+    equity_curve: list[dict[str, Any]] = Field(
+        default_factory=list, description="Equity curve data points"
+    )
+    error_message: str | None = Field(None, description="Error message if failed")

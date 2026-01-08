@@ -253,7 +253,7 @@
         "Run the backtest and verify results (equity curve + metrics + trades)",
         "Modify a parameter (e.g., horizon to 60 days) and verify the agent re-runs correctly"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "functional",

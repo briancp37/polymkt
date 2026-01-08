@@ -2597,6 +2597,161 @@ curl -X POST http://localhost:8000/api/dataset-agent/save \
 - All 625 tests pass (25 new tests for Dataset Agent)
 
 ### Next steps for future sessions:
-- Implement Backtesting Agent (natural language strategy requests)
 - Implement React frontend for datasets/backtests UX
 - Consider adding LLM-based query understanding for complex NL
+
+---
+
+## 2026-01-07: Backtesting Agent Feature
+
+### What was done:
+Implemented the Backtesting Agent feature that accepts natural-language strategy requests and executes backtests on selected datasets. This follows the same pattern as the Dataset Agent but for backtest execution.
+
+### Features implemented:
+1. **Backtesting Agent module** (`src/polymkt/agents/backtesting_agent.py`)
+   - `BacktestingAgent` class for processing strategy requests
+   - `StrategyParser` class for parsing natural language strategies
+   - `ParsedStrategy` dataclass for structured strategy configuration
+   - `StrategyConfirmation` dataclass for confirmation summaries
+   - `BacktestAgentRequest` and `BacktestAgentResult` dataclasses
+
+2. **Natural Language Strategy Parsing:**
+   - Entry timing patterns: "90 days out", "60 days before expiry", "3 months out", "DTE notation"
+   - Favorite rules: "buy favorite", "highest YES price", "front-runner", "buy underdog"
+   - Exit rules: "hold to expiry", "take profit at 90%", "stop loss"
+   - Fee/slippage extraction: "1% fee", "0.5% slippage"
+   - Case-insensitive matching with compiled regex patterns
+
+3. **Agent workflow:**
+   - `prepare_backtest()` - Parse NL strategy and return confirmation summary
+   - `modify_strategy()` - Adjust parameters before execution
+   - `execute_backtest()` - Run the backtest and return results
+   - `get_session()` - Retrieve existing sessions
+   - Session management with automatic cleanup after execution
+
+4. **API endpoints** (in `src/polymkt/api/main.py`)
+   - `POST /api/backtest-agent/prepare` - Prepare a backtest from NL strategy
+   - `POST /api/backtest-agent/execute` - Execute a prepared backtest
+   - `POST /api/backtest-agent/modify` - Modify strategy parameters
+   - `GET /api/backtest-agent/session/{session_id}` - Get session state
+
+5. **Pydantic schemas** (in `src/polymkt/models/schemas.py`)
+   - `ParsedStrategySchema` - Parsed strategy fields
+   - `BacktestAgentRequestSchema` - Request with NL strategy
+   - `BacktestAgentModifyRequestSchema` - Modification request
+   - `StrategyConfirmationSchema` - Confirmation with summary
+   - `BacktestAgentResultSchema` - Execution results
+
+### PRD requirements met:
+- Select a dataset_id (or provide a dataset name) ✓
+- Submit a strategy request in natural language (e.g., 'buy favorite 90 days out, hold to expiry') ✓
+- Verify the agent produces a confirmation summary of parsed rules ✓
+- Run the backtest and verify results (equity curve + metrics + trades) ✓
+- Modify a parameter (e.g., horizon to 60 days) and verify the agent re-runs correctly ✓
+
+### Tests added (`tests/test_backtesting_agent.py`):
+35 tests total.
+
+**TestStrategyParser (14 tests):**
+- `test_parse_basic_strategy`: Basic "buy favorite 90 days out" parsing
+- `test_parse_extracts_days`: Day extraction patterns
+- `test_parse_extracts_weeks`: Week-to-days conversion
+- `test_parse_extracts_months`: Month-to-days conversion
+- `test_parse_favorite_rule_buy_favorite`: "buy the favorite" detection
+- `test_parse_favorite_rule_highest_yes`: "highest yes price" detection
+- `test_parse_favorite_rule_underdog`: "buy underdog" detection
+- `test_parse_exit_rule_expiry`: "hold to expiry" detection
+- `test_parse_exit_rule_take_profit`: "take profit at 90%" with value
+- `test_parse_fee_rate`: Fee percentage extraction
+- `test_parse_slippage_rate`: Slippage percentage extraction
+- `test_parse_uses_defaults`: Default values when not specified
+- `test_generates_strategy_name`: Strategy name generation
+- `test_parse_horizon_syntax`: "horizon of 60 days" pattern
+
+**TestBacktestingAgent (9 tests):**
+- `test_prepare_backtest_returns_confirmation`: Confirmation generation
+- `test_prepare_backtest_stores_session`: Session storage
+- `test_prepare_backtest_with_overrides`: Fee/slippage overrides
+- `test_prepare_backtest_generates_summary`: Human-readable summary
+- `test_prepare_backtest_warns_missing_signals`: Warning for missing signals
+- `test_modify_strategy_updates_entry_days`: Entry days modification
+- `test_modify_strategy_updates_fee_rate`: Fee rate modification
+- `test_modify_invalid_session_raises`: Invalid session error
+- `test_prepare_backtest_invalid_dataset_raises`: Invalid dataset error
+
+**TestBacktestingAgentSchemas (7 tests):**
+- Schema validation tests for request/response formats
+
+**TestBacktestingAgentParsingEdgeCases (5 tests):**
+- `test_parse_dte_notation`: "90 DTE" pattern
+- `test_parse_front_runner`: "front-runner" as favorite
+- `test_parse_best_odds`: "best odds" as favorite
+- `test_parse_case_insensitive`: Case-insensitive matching
+- `test_parse_complex_strategy`: Full strategy with all components
+
+### Sample usage:
+```python
+# Create the agent
+agent = BacktestingAgent(
+    duckdb_layer=duckdb,
+    dataset_store=dataset_store,
+    backtest_store=backtest_store,
+    election_group_store=election_group_store,
+    favorite_signal_store=favorite_signal_store,
+)
+
+# Prepare a backtest from natural language
+request = BacktestAgentRequest(
+    dataset_id="dataset-123",
+    natural_language_strategy="buy favorite 90 days out, hold to expiry",
+)
+confirmation = agent.prepare_backtest(request)
+# Returns: session_id, parsed_strategy, summary, warnings
+
+# Modify the strategy (optional)
+confirmation = agent.modify_strategy(
+    session_id=confirmation.session_id,
+    entry_days_to_exp=60.0,  # Change to 60 days
+)
+
+# Execute the backtest
+result = agent.execute_backtest(confirmation.session_id)
+# Returns: backtest_id, status, metrics, trades, equity_curve
+```
+
+### API usage example:
+```bash
+# Prepare a backtest
+curl -X POST http://localhost:8000/api/backtest-agent/prepare \
+  -H "Content-Type: application/json" \
+  -d '{
+    "dataset_id": "dataset-123",
+    "natural_language_strategy": "buy favorite 90 days out, hold to expiry"
+  }'
+
+# Response includes session_id, parsed_strategy, summary
+
+# Modify strategy (optional)
+curl -X POST http://localhost:8000/api/backtest-agent/modify \
+  -H "Content-Type: application/json" \
+  -d '{
+    "session_id": "<id>",
+    "entry_days_to_exp": 60.0
+  }'
+
+# Execute the backtest
+curl -X POST "http://localhost:8000/api/backtest-agent/execute?session_id=<id>"
+```
+
+### Notes for next person:
+- The StrategyParser uses compiled regex patterns for efficiency
+- Sessions are stored in-memory; DuckDB layer is kept open until execution
+- Fee/slippage values are parsed as percentages (e.g., "1%" becomes 0.01)
+- The agent generates warnings for missing signals or election groups
+- All 660 tests pass (35 new tests for Backtesting Agent)
+- Typecheck passes with mypy
+
+### Next steps for future sessions:
+- Implement React frontend for datasets/backtests UX
+- Consider adding LLM-based query understanding for complex strategies
+- Add support for more advanced exit rules (trailing stops, etc.)

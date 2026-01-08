@@ -61,6 +61,11 @@ from polymkt.models.schemas import (
     UniquenessIssueSchema,
     UnmappedMarketsResult,
     UpdateSummary,
+    BacktestAgentRequestSchema,
+    BacktestAgentModifyRequestSchema,
+    BacktestAgentResultSchema,
+    ParsedStrategySchema,
+    StrategyConfirmationSchema,
 )
 from polymkt.pipeline.bootstrap import run_bootstrap
 from polymkt.pipeline.curate import run_curate
@@ -2720,3 +2725,268 @@ def dataset_agent_save(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save dataset: {e}")
+
+
+# =============================================================================
+# Backtesting Agent endpoints for natural language strategy execution
+# =============================================================================
+
+# Session storage for backtesting agent
+_backtest_agent_sessions: dict[str, dict[str, Any]] = {}
+
+
+@app.post(
+    "/api/backtest-agent/prepare",
+    response_model=StrategyConfirmationSchema,
+    tags=["Backtesting Agent"],
+)
+def backtest_agent_prepare(
+    request: BacktestAgentRequestSchema,
+) -> StrategyConfirmationSchema:
+    """
+    Prepare a backtest from a natural language strategy request.
+
+    The Backtesting Agent parses natural language strategies like:
+    - "buy favorite 90 days out, hold to expiry"
+    - "buy highest YES price 60 days before expiration"
+    - "buy leader 3 months out with 1% fee"
+
+    This endpoint returns a confirmation summary with parsed rules for
+    review before execution. Call /api/backtest-agent/execute with the
+    session_id to run the backtest.
+
+    Args:
+        request: Strategy request with dataset_id and natural language strategy
+
+    Returns:
+        Confirmation summary with parsed strategy and warnings
+    """
+    duckdb_layer: DuckDBLayer | None = None
+    try:
+        # Create DuckDB layer
+        duckdb_layer = DuckDBLayer(
+            settings.duckdb_path,
+            settings.parquet_dir,
+            partitioned=settings.parquet_partitioning_enabled,
+        )
+        duckdb_layer.create_views()
+
+        # Create stores
+        dataset_store = DatasetStore(settings.metadata_db_path)
+        backtest_store = BacktestStore(settings.metadata_db_path)
+        election_group_store = ElectionGroupStore(settings.metadata_db_path)
+        favorite_signal_store = FavoriteSignalStore(settings.metadata_db_path)
+
+        # Create agent
+        from polymkt.agents.backtesting_agent import BacktestingAgent, BacktestAgentRequest
+
+        agent = BacktestingAgent(
+            duckdb_layer=duckdb_layer,
+            dataset_store=dataset_store,
+            backtest_store=backtest_store,
+            election_group_store=election_group_store,
+            favorite_signal_store=favorite_signal_store,
+        )
+
+        # Prepare the backtest
+        agent_request = BacktestAgentRequest(
+            dataset_id=request.dataset_id,
+            natural_language_strategy=request.natural_language_strategy,
+            fee_rate=request.fee_rate,
+            slippage_rate=request.slippage_rate,
+            position_size=request.position_size,
+        )
+        confirmation = agent.prepare_backtest(agent_request)
+
+        # Store session (keep duckdb_layer open for execution)
+        _backtest_agent_sessions[confirmation.session_id] = {
+            "agent": agent,
+            "confirmation": confirmation,
+            "duckdb_layer": duckdb_layer,
+        }
+        # Don't close duckdb_layer here - it will be used during execute
+        duckdb_layer = None
+
+        return StrategyConfirmationSchema(
+            session_id=confirmation.session_id,
+            dataset_id=confirmation.dataset_id,
+            dataset_name=confirmation.dataset_name,
+            market_count=confirmation.market_count,
+            parsed_strategy=ParsedStrategySchema(
+                name=confirmation.parsed_strategy.name,
+                entry_days_to_exp=confirmation.parsed_strategy.entry_days_to_exp,
+                exit_rule=confirmation.parsed_strategy.exit_rule,
+                favorite_rule=confirmation.parsed_strategy.favorite_rule,
+                fee_rate=confirmation.parsed_strategy.fee_rate,
+                slippage_rate=confirmation.parsed_strategy.slippage_rate,
+                position_size=confirmation.parsed_strategy.position_size,
+                extra_params=confirmation.parsed_strategy.extra_params,
+            ),
+            summary=confirmation.summary,
+            warnings=confirmation.warnings,
+        )
+
+    except DatasetNotFoundError:
+        raise HTTPException(
+            status_code=404, detail=f"Dataset not found: {request.dataset_id}"
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to prepare backtest: {e}")
+    finally:
+        if duckdb_layer:
+            duckdb_layer.close()
+
+
+@app.post(
+    "/api/backtest-agent/execute",
+    response_model=BacktestAgentResultSchema,
+    tags=["Backtesting Agent"],
+)
+def backtest_agent_execute(session_id: str) -> BacktestAgentResultSchema:
+    """
+    Execute a prepared backtest.
+
+    After reviewing the confirmation summary from /api/backtest-agent/prepare,
+    call this endpoint with the session_id to run the backtest.
+
+    Args:
+        session_id: Session ID from prepare endpoint
+
+    Returns:
+        Backtest results with metrics, trades, and equity curve
+    """
+    session = _backtest_agent_sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+
+    duckdb_layer = session.get("duckdb_layer")
+    try:
+        agent = session["agent"]
+        result = agent.execute_backtest(session_id)
+
+        # Clean up session
+        del _backtest_agent_sessions[session_id]
+
+        return BacktestAgentResultSchema(
+            backtest_id=result.backtest_id,
+            status=result.status,
+            metrics=result.metrics,
+            trades=result.trades,
+            equity_curve=result.equity_curve,
+            error_message=result.error_message,
+        )
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to execute backtest: {e}")
+    finally:
+        # Clean up DuckDB layer
+        if duckdb_layer:
+            duckdb_layer.close()
+        # Clean up session on any error
+        if session_id in _backtest_agent_sessions:
+            del _backtest_agent_sessions[session_id]
+
+
+@app.post(
+    "/api/backtest-agent/modify",
+    response_model=StrategyConfirmationSchema,
+    tags=["Backtesting Agent"],
+)
+def backtest_agent_modify(
+    request: BacktestAgentModifyRequestSchema,
+) -> StrategyConfirmationSchema:
+    """
+    Modify a prepared strategy before execution.
+
+    Use this to adjust parameters like entry_days_to_exp, fee_rate, etc.
+    before running the backtest.
+
+    Args:
+        request: Modification request with session_id and new values
+
+    Returns:
+        Updated confirmation summary
+    """
+    session = _backtest_agent_sessions.get(request.session_id)
+    if not session:
+        raise HTTPException(
+            status_code=404, detail=f"Session not found: {request.session_id}"
+        )
+
+    try:
+        agent = session["agent"]
+        confirmation = agent.modify_strategy(
+            session_id=request.session_id,
+            entry_days_to_exp=request.entry_days_to_exp,
+            exit_rule=request.exit_rule,
+            favorite_rule=request.favorite_rule,
+            fee_rate=request.fee_rate,
+            slippage_rate=request.slippage_rate,
+            position_size=request.position_size,
+        )
+
+        # Update stored confirmation
+        session["confirmation"] = confirmation
+
+        return StrategyConfirmationSchema(
+            session_id=confirmation.session_id,
+            dataset_id=confirmation.dataset_id,
+            dataset_name=confirmation.dataset_name,
+            market_count=confirmation.market_count,
+            parsed_strategy=ParsedStrategySchema(
+                name=confirmation.parsed_strategy.name,
+                entry_days_to_exp=confirmation.parsed_strategy.entry_days_to_exp,
+                exit_rule=confirmation.parsed_strategy.exit_rule,
+                favorite_rule=confirmation.parsed_strategy.favorite_rule,
+                fee_rate=confirmation.parsed_strategy.fee_rate,
+                slippage_rate=confirmation.parsed_strategy.slippage_rate,
+                position_size=confirmation.parsed_strategy.position_size,
+                extra_params=confirmation.parsed_strategy.extra_params,
+            ),
+            summary=confirmation.summary,
+            warnings=confirmation.warnings,
+        )
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to modify strategy: {e}")
+
+
+@app.get(
+    "/api/backtest-agent/session/{session_id}",
+    response_model=StrategyConfirmationSchema,
+    tags=["Backtesting Agent"],
+)
+def backtest_agent_get_session(session_id: str) -> StrategyConfirmationSchema:
+    """
+    Get the current state of a backtesting agent session.
+    """
+    session = _backtest_agent_sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+
+    confirmation = session["confirmation"]
+
+    return StrategyConfirmationSchema(
+        session_id=confirmation.session_id,
+        dataset_id=confirmation.dataset_id,
+        dataset_name=confirmation.dataset_name,
+        market_count=confirmation.market_count,
+        parsed_strategy=ParsedStrategySchema(
+            name=confirmation.parsed_strategy.name,
+            entry_days_to_exp=confirmation.parsed_strategy.entry_days_to_exp,
+            exit_rule=confirmation.parsed_strategy.exit_rule,
+            favorite_rule=confirmation.parsed_strategy.favorite_rule,
+            fee_rate=confirmation.parsed_strategy.fee_rate,
+            slippage_rate=confirmation.parsed_strategy.slippage_rate,
+            position_size=confirmation.parsed_strategy.position_size,
+            extra_params=confirmation.parsed_strategy.extra_params,
+        ),
+        summary=confirmation.summary,
+        warnings=confirmation.warnings,
+    )
