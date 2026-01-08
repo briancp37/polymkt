@@ -2458,3 +2458,145 @@ Implemented the Cost efficiency nonfunctional feature verifying that local dev i
 - Implement Dataset Agent (natural language filters)
 - Implement Backtesting Agent (natural language strategy requests)
 - Implement React frontend for datasets/backtests UX
+
+---
+
+## 2026-01-07: Dataset Agent Feature
+
+### What was done:
+Implemented the Dataset Agent feature that accepts natural-language filters and produces a saved dataset with an editable market list. This enables users to create datasets using intuitive queries like "find election markets about senate control".
+
+### Features implemented:
+1. **DatasetAgent class** (`src/polymkt/agents/dataset_agent.py`)
+   - `DatasetAgent` class for processing natural language queries
+   - `NaturalLanguageParser` for extracting search intent and filters
+   - `MarketListItem` dataclass for markets with inclusion flags
+   - `DatasetAgentRequest` and `DatasetAgentResponse` dataclasses
+   - Session management for modification workflows
+
+2. **Natural language parsing:**
+   - Extracts category filters (politics, sports, crypto, etc.)
+   - Extracts time filters (year, "closing soon", before/after)
+   - Removes common filter phrases ("find", "show me", "about", etc.)
+   - Produces clean search queries for hybrid search
+
+3. **Market list management:**
+   - `process_query()` - Process NL query and return market list
+   - `modify_market_list()` - Toggle inclusion for a single market
+   - `bulk_modify_markets()` - Toggle inclusion for multiple markets
+   - `save_dataset()` - Save session as a persistent dataset
+
+4. **API endpoints** (`POST /api/dataset-agent/*`)
+   - `POST /api/dataset-agent/query` - Process NL query
+   - `POST /api/dataset-agent/modify` - Modify market inclusion
+   - `GET /api/dataset-agent/session/{session_id}` - Get session state
+   - `POST /api/dataset-agent/save` - Save dataset from session
+
+5. **Pydantic schemas** (in `src/polymkt/models/schemas.py`)
+   - `DatasetAgentRequestSchema` - Query request
+   - `DatasetAgentResponseSchema` - Query response with markets
+   - `DatasetAgentMarketItemSchema` - Market with inclusion flag
+   - `DatasetAgentModifyRequestSchema` - Modify request
+   - `DatasetAgentSaveRequestSchema` - Save request
+   - `DatasetAgentSaveResultSchema` - Save result
+
+### PRD requirements met:
+- Submit a natural-language request (e.g., 'find election markets about senate control') ✓
+- Agent returns a summary and a market list with inclusion flags ✓
+- Modify the market list (exclude a few) and resubmit ✓
+- Save the dataset and verify it appears in the dataset list ✓
+- Saved filters and market counts match what the agent displayed ✓
+
+### Tests added (`tests/test_dataset_agent.py`):
+25 tests total.
+
+**TestNaturalLanguageParser (6 tests):**
+- `test_parse_simple_query`: Basic query parsing
+- `test_parse_extracts_category`: Category extraction
+- `test_parse_extracts_year_filter`: Year filter extraction
+- `test_parse_removes_common_phrases`: Phrase cleaning
+- `test_parse_handles_show_me`: Show me phrase handling
+- `test_parse_sports_category`: Sports category detection
+
+**TestDatasetAgent (10 tests):**
+- `test_process_query_returns_markets`: Query returns markets
+- `test_process_query_all_included_by_default`: Default inclusion
+- `test_process_query_stores_session`: Session storage
+- `test_process_query_with_category_filter`: Category filtering
+- `test_modify_market_list`: Single market modification
+- `test_bulk_modify_markets`: Bulk modification
+- `test_modify_market_invalid_session`: Invalid session handling
+- `test_save_dataset`: Dataset saving
+- `test_save_dataset_cleans_session`: Session cleanup
+- `test_summary_generation`: Summary generation
+
+**TestDatasetAgentSchemas (4 tests):**
+- `test_request_schema_validates_empty_query`: Validation
+- `test_request_schema_accepts_valid_query`: Valid query
+- `test_response_schema_structure`: Response structure
+- `test_save_result_schema`: Save result structure
+
+**TestDatasetAgentParsedQuerySummary (3 tests):**
+- `test_parsed_query_matches_original`: Query matching
+- `test_category_filter_detected`: Category detection
+- `test_summary_includes_market_count`: Summary content
+
+**TestDatasetAgentFiltersPreserved (2 tests):**
+- `test_filters_saved_to_dataset`: Filter persistence
+- `test_market_counts_match`: Count verification
+
+### Sample usage:
+```python
+# Create the agent
+agent = DatasetAgent(conn=duckdb_conn, db_path=metadata_db_path)
+
+# Process a natural language query
+response = agent.process_query("find election markets about senate control")
+# Returns: session_id, markets list with inclusion flags, summary
+
+# Modify the market list (exclude first market)
+response = agent.modify_market_list(
+    session_id=response.session_id,
+    market_id=response.markets[0].market_id,
+    included=False,
+)
+
+# Save as a dataset
+result = agent.save_dataset(
+    response=response,
+    name="Senate Markets",
+    description="Markets about senate control",
+)
+# Returns: dataset_id, dataset_name, market_count, excluded_count
+```
+
+### API usage example:
+```bash
+# Query for markets
+curl -X POST http://localhost:8000/api/dataset-agent/query \
+  -H "Content-Type: application/json" \
+  -d '{"natural_language_query": "find election markets about senate control"}'
+
+# Response includes session_id, markets, summary
+
+# Modify markets
+curl -X POST http://localhost:8000/api/dataset-agent/modify \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "<id>", "market_id": "<market>", "included": false}'
+
+# Save dataset
+curl -X POST http://localhost:8000/api/dataset-agent/save \
+  -H "Content-Type: application/json" \
+  -d '{"session_id": "<id>", "name": "Senate Markets"}'
+```
+
+### Notes for next person:
+- The agent uses the existing hybrid search (BM25 + semantic) infrastructure
+- Sessions are stored in-memory; consider persistence for production
+- The NL parser is rule-based; consider LLM enhancement for complex queries
+- All 625 tests pass (25 new tests for Dataset Agent)
+
+### Next steps for future sessions:
+- Implement Backtesting Agent (natural language strategy requests)
+- Implement React frontend for datasets/backtests UX
+- Consider adding LLM-based query understanding for complex NL

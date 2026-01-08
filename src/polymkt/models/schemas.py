@@ -811,3 +811,83 @@ class CostEfficiencyReportSchema(BaseModel):
         ..., description="Estimated monthly cost in USD if on S3"
     )
     notes: list[str] = Field(default_factory=list, description="Analysis notes")
+
+
+# =============================================================================
+# Dataset Agent schemas for natural language dataset creation
+# =============================================================================
+
+
+class DatasetAgentMarketItemSchema(BaseModel):
+    """A market in the dataset agent's result with inclusion flag."""
+
+    market_id: str = Field(..., description="Market ID")
+    question: str = Field(..., description="Market question")
+    category: str | None = Field(None, description="Market category")
+    tags: list[str] | None = Field(None, description="Market tags")
+    closed_time: datetime | None = Field(None, description="Market close time")
+    relevance_score: float = Field(..., description="Relevance score from search")
+    included: bool = Field(True, description="Whether market is included in dataset")
+
+
+class DatasetAgentRequestSchema(BaseModel):
+    """Request for the dataset agent to process."""
+
+    natural_language_query: str = Field(
+        ...,
+        min_length=1,
+        max_length=1000,
+        description="Natural language query (e.g., 'find election markets about senate control')",
+    )
+    max_results: int = Field(100, ge=1, le=1000, description="Maximum markets to return")
+    category_filter: str | None = Field(None, description="Override category filter")
+    closed_time_min: str | None = Field(None, description="Override min closed time (ISO format)")
+    closed_time_max: str | None = Field(None, description="Override max closed time (ISO format)")
+
+
+class DatasetAgentResponseSchema(BaseModel):
+    """Response from the dataset agent."""
+
+    session_id: str = Field(..., description="Session ID for subsequent modifications")
+    query: str = Field(..., description="Original natural language query")
+    parsed_query: str = Field(..., description="Parsed search query")
+    category_filter: str | None = Field(None, description="Detected or applied category filter")
+    closed_time_filter: dict[str, str | None] | None = Field(
+        None, description="Detected or applied time filter"
+    )
+    market_count: int = Field(..., description="Number of included markets")
+    markets: list[DatasetAgentMarketItemSchema] = Field(
+        ..., description="Markets with inclusion flags"
+    )
+    summary: str = Field(..., description="Human-readable summary of results")
+
+
+class DatasetAgentModifyRequestSchema(BaseModel):
+    """Request to modify market inclusion in a session."""
+
+    session_id: str = Field(..., description="Session ID from process query")
+    market_id: str | None = Field(None, description="Single market ID to modify")
+    market_ids: list[str] | None = Field(None, description="Multiple market IDs to modify")
+    included: bool = Field(..., description="Whether to include the market(s)")
+
+
+class DatasetAgentSaveRequestSchema(BaseModel):
+    """Request to save the agent response as a dataset."""
+
+    session_id: str = Field(..., description="Session ID from process query")
+    name: str = Field(
+        ...,
+        min_length=1,
+        max_length=255,
+        description="Name for the dataset",
+    )
+    description: str | None = Field(None, max_length=2000, description="Dataset description")
+
+
+class DatasetAgentSaveResultSchema(BaseModel):
+    """Result of saving a dataset from agent response."""
+
+    dataset_id: str = Field(..., description="Created dataset ID")
+    dataset_name: str = Field(..., description="Dataset name")
+    market_count: int = Field(..., description="Number of included markets")
+    excluded_count: int = Field(..., description="Number of excluded markets")

@@ -241,7 +241,7 @@
         "Save the dataset and verify it appears in the dataset list",
         "Verify saved filters and market counts match what the agent displayed"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "functional",

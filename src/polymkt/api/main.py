@@ -17,6 +17,12 @@ from polymkt.models.schemas import (
     DataQualityCheckRequest,
     DataQualityReportListResponse,
     DataQualityReportSchema,
+    DatasetAgentMarketItemSchema,
+    DatasetAgentModifyRequestSchema,
+    DatasetAgentRequestSchema,
+    DatasetAgentResponseSchema,
+    DatasetAgentSaveRequestSchema,
+    DatasetAgentSaveResultSchema,
     DatasetCreateRequest,
     DatasetListResponse,
     DatasetSchema,
@@ -76,6 +82,7 @@ from polymkt.backtest.engine import BacktestEngine
 from polymkt.storage.data_quality import DataQualityChecker
 from polymkt.storage.performance import PerformanceBenchmarker
 from polymkt.storage.cost_efficiency import CostEfficiencyAnalyzer
+from polymkt.agents.dataset_agent import DatasetAgent, DatasetAgentRequest
 
 app = FastAPI(
     title="Polymkt Analytics API",
@@ -2481,3 +2488,235 @@ def analyze_cost_efficiency() -> CostEfficiencyReportSchema:
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to analyze cost efficiency: {e}")
+
+
+# =============================================================================
+# Dataset Agent endpoints for natural language dataset creation
+# =============================================================================
+
+
+# Store active dataset agent sessions (in-memory for simplicity)
+_dataset_agent_sessions: dict[str, Any] = {}
+
+
+@app.post("/api/dataset-agent/query", response_model=DatasetAgentResponseSchema, tags=["Dataset Agent"])
+def dataset_agent_query(
+    request: DatasetAgentRequestSchema,
+) -> DatasetAgentResponseSchema:
+    """
+    Process a natural language query and return a market list with inclusion flags.
+
+    The Dataset Agent accepts natural language queries like:
+    - "find election markets about senate control"
+    - "show me politics markets closing in 2024"
+    - "sports markets related to NFL playoffs"
+
+    The agent returns:
+    - A session_id for subsequent modifications
+    - Parsed query showing how the request was interpreted
+    - Market list with inclusion flags (all included by default)
+    - A summary of the results
+    """
+    try:
+        # Create DuckDB layer
+        layer = DuckDBLayer(settings.parquet_dir, settings.duckdb_path)
+
+        # Create the dataset agent
+        agent = DatasetAgent(
+            conn=layer.conn,
+            db_path=settings.metadata_db_path,
+            openai_api_key=settings.openai_api_key,
+        )
+
+        # Process the query
+        agent_request = DatasetAgentRequest(
+            natural_language_query=request.natural_language_query,
+            max_results=request.max_results,
+            category_filter=request.category_filter,
+            closed_time_min=request.closed_time_min,
+            closed_time_max=request.closed_time_max,
+        )
+        response = agent.process_query(agent_request)
+
+        # Store the session
+        _dataset_agent_sessions[response.session_id] = {
+            "agent": agent,
+            "response": response,
+        }
+
+        # Convert to response schema
+        markets = [
+            DatasetAgentMarketItemSchema(
+                market_id=m.market_id,
+                question=m.question,
+                category=m.category,
+                tags=m.tags,
+                closed_time=m.closed_time,
+                relevance_score=m.relevance_score,
+                included=m.included,
+            )
+            for m in response.markets
+        ]
+
+        return DatasetAgentResponseSchema(
+            session_id=response.session_id,
+            query=response.query,
+            parsed_query=response.parsed_query,
+            category_filter=response.category_filter,
+            closed_time_filter=response.closed_time_filter,
+            market_count=response.market_count,
+            markets=markets,
+            summary=response.summary,
+        )
+
+    except RuntimeError as e:
+        # Search index not available
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to process query: {e}")
+
+
+@app.post("/api/dataset-agent/modify", response_model=DatasetAgentResponseSchema, tags=["Dataset Agent"])
+def dataset_agent_modify(
+    request: DatasetAgentModifyRequestSchema,
+) -> DatasetAgentResponseSchema:
+    """
+    Modify market inclusion in a dataset agent session.
+
+    You can modify a single market or multiple markets at once.
+    Provide either market_id (for single) or market_ids (for bulk).
+    """
+    session = _dataset_agent_sessions.get(request.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session not found: {request.session_id}")
+
+    agent = session["agent"]
+    response = session["response"]
+
+    try:
+        # Modify single or multiple markets
+        if request.market_ids:
+            response = agent.bulk_modify_markets(
+                session_id=request.session_id,
+                market_ids=request.market_ids,
+                included=request.included,
+            )
+        elif request.market_id:
+            response = agent.modify_market_list(
+                session_id=request.session_id,
+                market_id=request.market_id,
+                included=request.included,
+            )
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Either market_id or market_ids must be provided",
+            )
+
+        # Update stored response
+        session["response"] = response
+
+        # Convert to response schema
+        markets = [
+            DatasetAgentMarketItemSchema(
+                market_id=m.market_id,
+                question=m.question,
+                category=m.category,
+                tags=m.tags,
+                closed_time=m.closed_time,
+                relevance_score=m.relevance_score,
+                included=m.included,
+            )
+            for m in response.markets
+        ]
+
+        return DatasetAgentResponseSchema(
+            session_id=response.session_id,
+            query=response.query,
+            parsed_query=response.parsed_query,
+            category_filter=response.category_filter,
+            closed_time_filter=response.closed_time_filter,
+            market_count=response.market_count,
+            markets=markets,
+            summary=response.summary,
+        )
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to modify markets: {e}")
+
+
+@app.get("/api/dataset-agent/session/{session_id}", response_model=DatasetAgentResponseSchema, tags=["Dataset Agent"])
+def dataset_agent_get_session(session_id: str) -> DatasetAgentResponseSchema:
+    """
+    Get the current state of a dataset agent session.
+    """
+    session = _dataset_agent_sessions.get(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}")
+
+    response = session["response"]
+
+    # Convert to response schema
+    markets = [
+        DatasetAgentMarketItemSchema(
+            market_id=m.market_id,
+            question=m.question,
+            category=m.category,
+            tags=m.tags,
+            closed_time=m.closed_time,
+            relevance_score=m.relevance_score,
+            included=m.included,
+        )
+        for m in response.markets
+    ]
+
+    return DatasetAgentResponseSchema(
+        session_id=response.session_id,
+        query=response.query,
+        parsed_query=response.parsed_query,
+        category_filter=response.category_filter,
+        closed_time_filter=response.closed_time_filter,
+        market_count=response.market_count,
+        markets=markets,
+        summary=response.summary,
+    )
+
+
+@app.post("/api/dataset-agent/save", response_model=DatasetAgentSaveResultSchema, status_code=201, tags=["Dataset Agent"])
+def dataset_agent_save(
+    request: DatasetAgentSaveRequestSchema,
+) -> DatasetAgentSaveResultSchema:
+    """
+    Save the dataset agent session as a dataset.
+
+    This saves the current market list (respecting inclusion flags) as a
+    persistent dataset that can be used for backtesting and analysis.
+    """
+    session = _dataset_agent_sessions.get(request.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail=f"Session not found: {request.session_id}")
+
+    agent = session["agent"]
+    response = session["response"]
+
+    try:
+        result = agent.save_dataset(
+            response=response,
+            name=request.name,
+            description=request.description,
+        )
+
+        # Clean up session
+        del _dataset_agent_sessions[request.session_id]
+
+        return DatasetAgentSaveResultSchema(
+            dataset_id=result.dataset_id,
+            dataset_name=result.dataset_name,
+            market_count=result.market_count,
+            excluded_count=result.excluded_count,
+        )
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save dataset: {e}")
