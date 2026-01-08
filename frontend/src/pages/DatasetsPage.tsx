@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { Database, Calendar, Tag, Plus } from 'lucide-react';
 import { format } from 'date-fns';
 import { listDatasets } from '../api/client';
@@ -109,10 +109,12 @@ export function DatasetsPage() {
             {data?.total_count ?? 0} datasets saved
           </p>
         </div>
-        <Button>
-          <Plus className="w-4 h-4 mr-2" />
-          New Dataset
-        </Button>
+        <Link to="/datasets/new">
+          <Button>
+            <Plus className="w-4 h-4 mr-2" />
+            New Dataset
+          </Button>
+        </Link>
       </div>
 
       {/* Dataset Grid */}
@@ -128,10 +130,12 @@ export function DatasetsPage() {
           title="No datasets yet"
           description="Create your first dataset to start organizing markets for backtesting."
           action={
-            <Button>
-              <Plus className="w-4 h-4 mr-2" />
-              Create Dataset
-            </Button>
+            <Link to="/datasets/new">
+              <Button>
+                <Plus className="w-4 h-4 mr-2" />
+                Create Dataset
+              </Button>
+            </Link>
           }
         />
       )}

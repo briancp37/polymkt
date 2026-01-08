@@ -114,6 +114,26 @@ export interface Market {
 export interface MarketSearchResult extends Market {
   relevance_score: number;
   snippet?: string;
+  bm25_score?: number;
+  semantic_score?: number;
+}
+
+export interface MarketSearchResponse {
+  results: MarketSearchResult[];
+  count: number;
+  total_count: number;
+  has_more: boolean;
+  mode: 'bm25' | 'semantic' | 'hybrid';
+}
+
+export interface MarketSearchParams {
+  q: string;
+  mode?: 'bm25' | 'semantic' | 'hybrid';
+  limit?: number;
+  offset?: number;
+  category?: string;
+  closed_time_min?: string;
+  closed_time_max?: string;
 }
 
 // API Response types

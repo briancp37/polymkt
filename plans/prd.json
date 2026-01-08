@@ -376,7 +376,7 @@
         "Verify each market row has a checkbox (checked = included)",
         "Verify the user can uncheck markets to exclude them"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "UX",

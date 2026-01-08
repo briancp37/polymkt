@@ -4,3 +4,6 @@ export { Button } from './Button';
 export { Badge } from './Badge';
 export { LoadingSpinner, PageLoading } from './LoadingSpinner';
 export { EmptyState } from './EmptyState';
+export { MarketSearch } from './MarketSearch';
+export { MarketList } from './MarketList';
+export type { MarketSelection } from './MarketList';

@@ -4,6 +4,8 @@ import type {
   BacktestListResponse,
   Backtest,
   HealthResponse,
+  MarketSearchResponse,
+  MarketSearchParams,
 } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -115,6 +117,22 @@ export async function deleteBacktest(id: string): Promise<void> {
   await fetchJson(`/api/backtests/${id}`, {
     method: 'DELETE',
   });
+}
+
+// Market Search
+export async function searchMarkets(
+  params: MarketSearchParams
+): Promise<MarketSearchResponse> {
+  const searchParams = new URLSearchParams();
+  searchParams.set('q', params.q);
+  if (params.mode) searchParams.set('mode', params.mode);
+  if (params.limit) searchParams.set('limit', params.limit.toString());
+  if (params.offset) searchParams.set('offset', params.offset.toString());
+  if (params.category) searchParams.set('category', params.category);
+  if (params.closed_time_min) searchParams.set('closed_time_min', params.closed_time_min);
+  if (params.closed_time_max) searchParams.set('closed_time_max', params.closed_time_max);
+
+  return fetchJson<MarketSearchResponse>(`/api/markets/search?${searchParams.toString()}`);
 }
 
 export { ApiError };

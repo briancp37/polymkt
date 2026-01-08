@@ -2870,3 +2870,66 @@ npm run build   # Production build
 - Add charting library for equity curve visualization
 - Connect edit/delete buttons to API
 - Implement "Load more" pagination with selection persistence
+---
+
+## 2026-01-07: Market List with Search and Selection Checkboxes Feature
+
+### What was done:
+Implemented the Market List section with search, relevance sorting, and selection checkboxes for the dataset creation workflow.
+
+### Features implemented:
+1. **Market Search API client** (`frontend/src/api/client.ts`)
+   - `searchMarkets()` function that calls `/api/markets/search`
+   - Supports query, mode, limit, offset, category, and date filters
+
+2. **MarketSearch component** (`frontend/src/components/MarketSearch.tsx`)
+   - Search input with clear button
+   - Category dropdown filter (Politics, Sports, Crypto, etc.)
+   - Search button with loading state
+
+3. **MarketList component** (`frontend/src/components/MarketList.tsx`)
+   - Clickable rows with checkbox for selection
+   - Sort by relevance (default), name, or close date
+   - Relevance score displayed as percentage badge
+   - Market metadata: category, close date, tags
+   - Select All / Deselect All functionality
+   - Selection count display
+   - Load More button for pagination
+
+4. **CreateDatasetPage** (`frontend/src/pages/CreateDatasetPage.tsx`)
+   - Two-column layout: search/list on left, form/summary on right
+   - Search markets with hybrid search (BM25 + semantic)
+   - Markets default to selected on search results
+   - Dataset name and description form fields
+   - Selection summary showing included/excluded counts
+   - Create Dataset button with validation
+   - Redirects to dataset detail on successful creation
+
+5. **Routing updates** (`frontend/src/App.tsx`)
+   - Added `/datasets/new` route for create page
+   - Updated Datasets list page to link to create page
+
+6. **Type definitions** (`frontend/src/types/index.ts`)
+   - `MarketSearchResponse` - search response with pagination
+   - `MarketSearchParams` - search parameters
+
+### PRD requirements met:
+- Open the Dataset creation flow and navigate to the Market List section ✓
+- Enter a search term (e.g., 'election') and run search ✓
+- Verify results appear sorted by relevance score by default ✓
+- Verify each market row has a checkbox (checked = included) ✓
+- Verify the user can uncheck markets to exclude them ✓
+
+### Notes for next person:
+- The MarketList component stores selection state as a map of market_id -> boolean
+- Selection persists across load more operations (handled by state merge)
+- Default selection is true (markets selected by default)
+- The Create Dataset page saves both included and excluded market IDs
+- Frontend builds successfully with `npm run build`
+- All 660 backend tests pass
+
+### Next steps for future sessions:
+- Implement "Load more" pagination test verification
+- Implement dataset creation confirmation flow
+- Implement strategy confirmation screen
+- Add charting library for equity curve visualization

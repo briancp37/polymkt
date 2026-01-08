@@ -5,6 +5,7 @@ import {
   HomePage,
   DatasetsPage,
   DatasetDetailPage,
+  CreateDatasetPage,
   BacktestsPage,
   BacktestDetailPage,
 } from './pages';
@@ -26,6 +27,7 @@ function App() {
           <Route path="/" element={<Layout />}>
             <Route index element={<HomePage />} />
             <Route path="datasets" element={<DatasetsPage />} />
+            <Route path="datasets/new" element={<CreateDatasetPage />} />
             <Route path="datasets/:id" element={<DatasetDetailPage />} />
             <Route path="backtests" element={<BacktestsPage />} />
             <Route path="backtests/:id" element={<BacktestDetailPage />} />
