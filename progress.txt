@@ -2755,3 +2755,118 @@ curl -X POST "http://localhost:8000/api/backtest-agent/execute?session_id=<id>"
 - Implement React frontend for datasets/backtests UX
 - Consider adding LLM-based query understanding for complex strategies
 - Add support for more advanced exit rules (trailing stops, etc.)
+---
+
+## 2026-01-07: React Frontend - Datasets & Backtests Lists Feature
+
+### What was done:
+Implemented the React frontend for the PolyMkt application with Datasets and Backtests list pages, detail pages, and a professional research workflow UI.
+
+### Features implemented:
+1. **React + TypeScript + Vite setup** (`frontend/`)
+   - React 18 with TypeScript and Vite bundler
+   - Tailwind CSS v4 for styling
+   - React Router v6 for routing
+   - TanStack Query for data fetching and caching
+   - Lucide React for icons
+   - date-fns for date formatting
+
+2. **Shared components** (`frontend/src/components/`)
+   - `Layout` - Main layout with header navigation
+   - `Card`, `CardHeader`, `CardContent` - Card container components
+   - `Button` - Button with variants (primary, secondary, danger, ghost) and sizes
+   - `Badge` - Status/label badges with color variants
+   - `LoadingSpinner`, `PageLoading` - Loading indicators
+   - `EmptyState` - Empty state display component
+
+3. **API client** (`frontend/src/api/client.ts`)
+   - Type-safe API client with fetch
+   - Endpoints for datasets CRUD
+   - Endpoints for backtests CRUD + execution
+   - Health check endpoint
+   - Error handling with ApiError class
+
+4. **Datasets pages** (`frontend/src/pages/`)
+   - `DatasetsPage` - List view with cards showing market count, category, tags, update date
+   - `DatasetDetailPage` - Detail view with stats, filters, market list (included/excluded), edit/delete
+
+5. **Backtests pages** (`frontend/src/pages/`)
+   - `BacktestsPage` - List view with cards showing strategy name, status, metrics (return, PnL, win rate, trade count)
+   - `BacktestDetailPage` - Detail view with strategy config, metrics grid, trades table, equity curve placeholder
+
+6. **Home page** (`frontend/src/pages/HomePage.tsx`)
+   - Dashboard with API connection status
+   - Quick stats (dataset count, backtest count, completed runs)
+   - Recent datasets and backtests lists
+
+7. **Types** (`frontend/src/types/index.ts`)
+   - Full TypeScript interfaces for all API data models
+   - Dataset, Backtest, Market, Strategy types
+
+### PRD requirements met:
+- Open the app and navigate to Datasets ✓
+- Verify a list of saved datasets is displayed with key stats (market count, date range, category/tags) ✓
+- Open a dataset detail page and verify markets list is viewable/editable ✓
+- Navigate to Backtests and verify saved runs are listed ✓
+- Open a backtest detail page and verify results are rendered ✓
+
+### Project structure:
+```
+frontend/
+├── index.html
+├── package.json
+├── postcss.config.js
+├── tailwind.config.js
+├── tsconfig.json
+├── tsconfig.app.json
+├── tsconfig.node.json
+├── vite.config.ts
+└── src/
+    ├── App.tsx
+    ├── main.tsx
+    ├── index.css
+    ├── api/
+    │   └── client.ts
+    ├── components/
+    │   ├── index.ts
+    │   ├── Layout.tsx
+    │   ├── Card.tsx
+    │   ├── Button.tsx
+    │   ├── Badge.tsx
+    │   ├── LoadingSpinner.tsx
+    │   └── EmptyState.tsx
+    ├── pages/
+    │   ├── index.ts
+    │   ├── HomePage.tsx
+    │   ├── DatasetsPage.tsx
+    │   ├── DatasetDetailPage.tsx
+    │   ├── BacktestsPage.tsx
+    │   └── BacktestDetailPage.tsx
+    └── types/
+        └── index.ts
+```
+
+### How to run:
+```bash
+cd frontend
+npm install
+npm run dev     # Development server at http://localhost:5173
+npm run build   # Production build
+```
+
+### Notes for next person:
+- Frontend builds successfully with `npm run build`
+- All 660 backend tests still pass
+- The frontend requires the backend API to be running at http://localhost:8000
+- Environment variable VITE_API_URL can override the API URL
+- The equity curve chart is a placeholder - would need a charting library (Recharts, Chart.js) for full visualization
+- Edit/delete buttons are UI-ready but don't have click handlers implemented yet
+- The "New Dataset" and "New Backtest" buttons are present but need creation flows
+
+### Next steps for future sessions:
+- Implement Market List section with search and selection checkboxes
+- Implement dataset creation flow with market search
+- Implement strategy confirmation screen
+- Add charting library for equity curve visualization
+- Connect edit/delete buttons to API
+- Implement "Load more" pagination with selection persistence

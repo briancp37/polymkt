@@ -364,7 +364,7 @@
         "Navigate to Backtests and verify saved runs are listed",
         "Open a backtest detail page and verify results are rendered"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "UX",
