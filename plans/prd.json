@@ -388,7 +388,7 @@
         "Select additional markets on the new page",
         "Verify selections from earlier pages remain intact"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "category": "UX",

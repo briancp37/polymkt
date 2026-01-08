@@ -2933,3 +2933,68 @@ Implemented the Market List section with search, relevance sorting, and selectio
 - Implement dataset creation confirmation flow
 - Implement strategy confirmation screen
 - Add charting library for equity curve visualization
+
+---
+
+## 2026-01-08: Market List Load More Pagination Feature
+
+### What was done:
+Added frontend testing infrastructure and verified the "Load more" pagination with selection persistence feature in the MarketList component. The implementation was already in place but needed tests to verify correctness.
+
+### Features verified/implemented:
+1. **Frontend testing setup**
+   - Added Vitest testing framework with React Testing Library
+   - Created test setup file with jest-dom matchers
+   - Updated vite.config.ts with test configuration
+   - Added test script to package.json
+
+2. **MarketList component tests** (`frontend/src/components/MarketList.test.tsx`)
+   - 18 tests covering all MarketList functionality:
+     - Rendering: empty state, markets with checkboxes, selected count
+     - Selection: toggle clicks, default selection behavior
+     - Select all / Deselect all: bulk operations
+     - Load more: button visibility, click handler, loading state
+     - Sorting: by relevance, name, close date
+
+3. **Selection persistence verification**
+   - Tests verify the pattern from CreateDatasetPage (lines 91-98)
+   - New markets are added with `true` selection only if not already in selection map
+   - User selections on earlier pages are preserved when loading more
+   - Selection count is based on the full selection object, not just rendered markets
+
+### PRD requirements met:
+- Search for a term that returns many markets ✓
+- Select or unselect several markets on page 1 ✓
+- Click 'Load more' to fetch the next page ✓
+- Select additional markets on the new page ✓
+- Verify selections from earlier pages remain intact ✓
+
+### Test results:
+- Frontend: 18 tests passing (new tests for MarketList)
+- Backend: 660 tests passing (no changes)
+- Frontend build: Successful
+- Backend typecheck: Successful (0 issues in 34 source files)
+
+### Files added:
+- `frontend/src/test/setup.ts` - Test setup with jest-dom
+- `frontend/src/components/MarketList.test.tsx` - MarketList tests
+
+### Files modified:
+- `frontend/vite.config.ts` - Added vitest configuration
+- `frontend/package.json` - Added test scripts and dependencies
+
+### PRD features marked as passing:
+- Market List supports 'Load more' pagination and preserves selections across pages
+
+### Notes for next person:
+- The MarketList component's selection persistence is implemented in CreateDatasetPage
+- Selection state is managed as a map of market_id -> boolean
+- New markets from load more default to selected (true) unless already in selection
+- Run `npm test` in frontend directory to run all tests
+- The frontend testing framework is now set up for future component tests
+
+### Next steps for future sessions:
+- Implement dataset creation confirmation flow
+- Implement dataset market list editing
+- Implement strategy confirmation screen
+- Implement backtest results visualization with charts
