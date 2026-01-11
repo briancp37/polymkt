@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link } from 'react-router-dom';
 import { LineChart, Calendar, TrendingUp, TrendingDown, Clock, Plus } from 'lucide-react';
 import { format } from 'date-fns';
 import { listBacktests } from '../api/client';
@@ -151,10 +151,12 @@ export function BacktestsPage() {
             {data?.total_count ?? 0} backtest runs saved
           </p>
         </div>
-        <Button>
-          <Plus className="w-4 h-4 mr-2" />
-          New Backtest
-        </Button>
+        <Link to="/backtests/new">
+          <Button>
+            <Plus className="w-4 h-4 mr-2" />
+            New Backtest
+          </Button>
+        </Link>
       </div>
 
       {/* Backtest Grid */}
@@ -170,10 +172,12 @@ export function BacktestsPage() {
           title="No backtests yet"
           description="Run your first backtest to see historical strategy performance."
           action={
-            <Button>
-              <Plus className="w-4 h-4 mr-2" />
-              Create Backtest
-            </Button>
+            <Link to="/backtests/new">
+              <Button>
+                <Plus className="w-4 h-4 mr-2" />
+                Create Backtest
+              </Button>
+            </Link>
           }
         />
       )}

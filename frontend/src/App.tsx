@@ -8,6 +8,7 @@ import {
   CreateDatasetPage,
   BacktestsPage,
   BacktestDetailPage,
+  CreateBacktestPage,
 } from './pages';
 
 const queryClient = new QueryClient({
@@ -30,6 +31,7 @@ function App() {
             <Route path="datasets/new" element={<CreateDatasetPage />} />
             <Route path="datasets/:id" element={<DatasetDetailPage />} />
             <Route path="backtests" element={<BacktestsPage />} />
+            <Route path="backtests/new" element={<CreateBacktestPage />} />
             <Route path="backtests/:id" element={<BacktestDetailPage />} />
           </Route>
         </Routes>

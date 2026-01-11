@@ -12,6 +12,8 @@ import {
   MarketList,
   LoadingSpinner,
   EmptyState,
+  ConfirmationModal,
+  DatasetConfirmationContent,
 } from '../components';
 import type { MarketSelection } from '../components';
 import type { MarketSearchResult, DatasetFilters } from '../types';
@@ -34,6 +36,9 @@ export function CreateDatasetPage() {
   // Dataset form state
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+
+  // Confirmation modal state
+  const [showConfirmation, setShowConfirmation] = useState(false);
 
   const LIMIT = 50;
 
@@ -127,12 +132,26 @@ export function CreateDatasetPage() {
       });
     },
     onSuccess: (dataset) => {
+      setShowConfirmation(false);
       navigate(`/datasets/${dataset.id}`);
     },
   });
 
   const selectedCount = Object.values(selection).filter(Boolean).length;
+  const excludedCount = Object.values(selection).filter((v) => !v).length;
   const canSave = name.trim() && selectedCount > 0;
+
+  const handleCreateClick = () => {
+    setShowConfirmation(true);
+  };
+
+  const handleConfirm = () => {
+    createDatasetMutation.mutate();
+  };
+
+  const handleCancelConfirmation = () => {
+    setShowConfirmation(false);
+  };
 
   return (
     <div>
@@ -273,7 +292,7 @@ export function CreateDatasetPage() {
               <div className="flex justify-between text-sm">
                 <span className="text-gray-500">Excluded Markets</span>
                 <span className="font-medium text-gray-400">
-                  {Object.values(selection).filter((v) => !v).length}
+                  {excludedCount}
                 </span>
               </div>
               {searchQuery && (
@@ -293,10 +312,10 @@ export function CreateDatasetPage() {
           <Button
             className="w-full"
             size="lg"
-            disabled={!canSave || createDatasetMutation.isPending}
-            onClick={() => createDatasetMutation.mutate()}
+            disabled={!canSave}
+            onClick={handleCreateClick}
           >
-            {createDatasetMutation.isPending ? 'Creating...' : 'Create Dataset'}
+            Create Dataset
           </Button>
 
           {createDatasetMutation.isError && (
@@ -306,6 +325,25 @@ export function CreateDatasetPage() {
           )}
         </div>
       </div>
+
+      {/* Confirmation Modal */}
+      <ConfirmationModal
+        isOpen={showConfirmation}
+        onClose={handleCancelConfirmation}
+        onConfirm={handleConfirm}
+        title="Confirm Dataset Creation"
+        confirmText="Create Dataset"
+        isLoading={createDatasetMutation.isPending}
+      >
+        <DatasetConfirmationContent
+          name={name}
+          description={description || undefined}
+          includedCount={selectedCount}
+          excludedCount={excludedCount}
+          searchQuery={searchQuery || undefined}
+          searchCategory={searchCategory}
+        />
+      </ConfirmationModal>
     </div>
   );
 }

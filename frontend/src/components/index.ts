@@ -7,3 +7,5 @@ export { EmptyState } from './EmptyState';
 export { MarketSearch } from './MarketSearch';
 export { MarketList } from './MarketList';
 export type { MarketSelection } from './MarketList';
+export { ConfirmationModal, DatasetConfirmationContent } from './ConfirmationModal';
+export { StrategyConfirmationContent } from './StrategyConfirmationContent';

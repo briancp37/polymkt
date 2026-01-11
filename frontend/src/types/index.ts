@@ -136,6 +136,40 @@ export interface MarketSearchParams {
   closed_time_max?: string;
 }
 
+// Strategy confirmation types
+export interface ParsedStrategy {
+  name: string;
+  entry_days_to_exp: number;
+  exit_rule: string;
+  favorite_rule: string;
+  fee_rate: number;
+  slippage_rate: number;
+  position_size: number;
+  extra_params?: Record<string, unknown>;
+}
+
+export interface StrategyConfirmation {
+  session_id: string;
+  dataset_id: string;
+  dataset_name: string;
+  market_count: number;
+  parsed_strategy: ParsedStrategy;
+  summary: string;
+  warnings: string[];
+}
+
+export interface BacktestAgentRequest {
+  dataset_id: string;
+  natural_language_strategy: string;
+  fee_rate?: number;
+  slippage_rate?: number;
+  position_size?: number;
+}
+
+export interface BacktestAgentExecuteRequest {
+  session_id: string;
+}
+
 // API Response types
 export interface HealthResponse {
   status: string;

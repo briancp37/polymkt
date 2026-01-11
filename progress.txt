@@ -2998,3 +2998,152 @@ Added frontend testing infrastructure and verified the "Load more" pagination wi
 - Implement dataset market list editing
 - Implement strategy confirmation screen
 - Implement backtest results visualization with charts
+
+---
+
+## 2026-01-08: Dataset Creation Confirmation Flow Feature
+
+### What was done:
+Implemented the dataset creation confirmation flow that requires users to review and confirm their selection before saving a dataset.
+
+### Features implemented:
+1. **ConfirmationModal component** (`frontend/src/components/ConfirmationModal.tsx`)
+   - Reusable modal component with backdrop
+   - Support for title, custom button text, loading state
+   - Variant support (default/danger)
+   - Close on backdrop click or X button
+
+2. **DatasetConfirmationContent component**
+   - Displays dataset name and description
+   - Shows selection basis (search query and category)
+   - Displays included/excluded market counts prominently
+   - Clear call-to-action text
+
+3. **Updated CreateDatasetPage** (`frontend/src/pages/CreateDatasetPage.tsx`)
+   - "Create Dataset" button now opens confirmation modal
+   - Modal shows full summary before saving
+   - Saving only occurs after user clicks "Create Dataset" in modal
+   - Loading state shown during save operation
+   - Modal closes and redirects on success
+
+4. **Tests for ConfirmationModal** (`frontend/src/components/ConfirmationModal.test.tsx`)
+   - 20 tests covering:
+     - Rendering (open/closed state, button text)
+     - Interactions (close, confirm, backdrop click)
+     - Loading state (disabled buttons, loading text)
+     - DatasetConfirmationContent rendering
+     - Full confirmation flow
+
+### PRD requirements met:
+- Perform a market search and select a set of markets via checkboxes ✓
+- Click 'Continue' or 'Save dataset' ✓ (opens confirmation modal)
+- Verify a confirmation summary shows count of included markets and the selection basis ✓
+- Confirm to save ✓ (clicking "Create Dataset" in modal)
+- Verify dataset is saved with its market list exactly matching the UI selection ✓
+
+### Test results:
+- Frontend tests: 38 passing (20 new for ConfirmationModal, 18 existing for MarketList)
+- Backend tests: 660 passing (no changes)
+- Frontend build: Successful
+
+### Files added:
+- `frontend/src/components/ConfirmationModal.tsx` - Modal and content components
+- `frontend/src/components/ConfirmationModal.test.tsx` - Modal tests
+
+### Files modified:
+- `frontend/src/components/index.ts` - Export new components
+- `frontend/src/pages/CreateDatasetPage.tsx` - Integrated confirmation flow
+
+### PRD features marked as passing:
+- Dataset creation requires user confirmation of the Market List before saving the dataset
+
+### Notes for next person:
+- The ConfirmationModal is reusable for other confirmation flows (e.g., delete, backtest execution)
+- The modal closes automatically on successful save
+- The modal has a "danger" variant for destructive actions
+- Selection counts are calculated once and reused throughout the component
+
+### Next steps for future sessions:
+- Implement dataset market list editing
+- Implement strategy confirmation screen
+- Implement backtest results visualization with charts
+
+---
+
+## 2026-01-11: Strategy Confirmation Screen Feature
+
+### What was done:
+Implemented the strategy confirmation screen that requires users to review parsed strategy parameters before executing a backtest. This prevents accidental executions and ensures users understand what the strategy will do.
+
+### Features implemented:
+1. **Frontend types** (`frontend/src/types/index.ts`)
+   - `ParsedStrategy` - Strategy parameters (entry_days, exit_rule, fees, etc.)
+   - `StrategyConfirmation` - Confirmation payload with parsed strategy and warnings
+   - `BacktestAgentRequest` - Request for preparing a backtest
+   - `BacktestAgentExecuteRequest` - Request for executing a prepared backtest
+
+2. **API client functions** (`frontend/src/api/client.ts`)
+   - `prepareBacktest()` - Calls POST /api/backtest-agent/prepare to parse strategy
+   - `executeBacktestSession()` - Calls POST /api/backtest-agent/execute with session ID
+
+3. **StrategyConfirmationContent component** (`frontend/src/components/StrategyConfirmationContent.tsx`)
+   - Displays parsed strategy name and parameters
+   - Shows dataset info (name and market count)
+   - Displays entry timing, exit rule, and market selection (favorite rule)
+   - Shows trading costs (fee rate, slippage, position size)
+   - Displays warnings if any prerequisites are missing
+   - Shows human-readable summary from parser
+
+4. **CreateBacktestPage** (`frontend/src/pages/CreateBacktestPage.tsx`)
+   - Dataset selector dropdown (lists all available datasets)
+   - Natural language strategy input textarea
+   - Example strategy buttons for quick input
+   - "Preview Backtest" button calls prepare API
+   - Confirmation modal shows parsed strategy before execution
+   - "Run Backtest" button in modal executes the backtest
+   - Redirects to backtest detail page on success
+   - Error handling for failed parsing
+
+5. **Navigation wiring**
+   - Added route /backtests/new to App.tsx
+   - Wired "New Backtest" button on BacktestsPage to navigate to create page
+   - Wired "Create Backtest" button in empty state to navigate to create page
+
+### PRD requirements met:
+- Parse strategy parameters from user or LLM ✓ (backend was already implemented)
+- Display parsed strategy and parameters for confirmation ✓
+- Require explicit confirmation before execution ✓
+
+### Test results:
+- Frontend tests: 38 passing (no new tests needed - uses existing ConfirmationModal tests)
+- Backend tests: 660 passing (no changes to backend)
+- Frontend build: Successful
+
+### Files added:
+- `frontend/src/components/StrategyConfirmationContent.tsx` - Strategy confirmation UI
+- `frontend/src/pages/CreateBacktestPage.tsx` - Backtest creation page
+
+### Files modified:
+- `frontend/src/types/index.ts` - Added strategy confirmation types
+- `frontend/src/api/client.ts` - Added prepare/execute API functions
+- `frontend/src/components/index.ts` - Export new component
+- `frontend/src/pages/index.ts` - Export new page
+- `frontend/src/App.tsx` - Added route for create backtest page
+- `frontend/src/pages/BacktestsPage.tsx` - Wired New Backtest button
+
+### PRD feature marked as passing:
+- Carry-over: Strategy confirmation screen before execution
+
+### Notes for next person:
+- The backend already supports prepare/execute/modify endpoints for the backtesting agent
+- The prepare endpoint returns warnings if favorite signals are missing at the target days-to-exp
+- Session IDs are stored in memory on the backend and link preparation to execution
+- The StrategyConfirmationContent component is reusable for other strategy-related confirmations
+- Consider adding tests for CreateBacktestPage if more UI behavior is added
+- The modify endpoint (POST /api/backtest-agent/modify) is available but not wired in frontend yet
+
+### Next steps for future sessions:
+- Implement dataset market list editing (Carry-over: Dataset editing)
+- Implement backtest results visualization with equity curves (Carry-over)
+- Add optional parameter modification before execution
+- Add polling for backtest execution status (currently just redirects)

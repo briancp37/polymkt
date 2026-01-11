@@ -6,6 +6,9 @@ import type {
   HealthResponse,
   MarketSearchResponse,
   MarketSearchParams,
+  StrategyConfirmation,
+  BacktestAgentRequest,
+  BacktestAgentExecuteRequest,
 } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
@@ -133,6 +136,25 @@ export async function searchMarkets(
   if (params.closed_time_max) searchParams.set('closed_time_max', params.closed_time_max);
 
   return fetchJson<MarketSearchResponse>(`/api/markets/search?${searchParams.toString()}`);
+}
+
+// Backtest Agent (Natural Language Strategy)
+export async function prepareBacktest(
+  request: BacktestAgentRequest
+): Promise<StrategyConfirmation> {
+  return fetchJson<StrategyConfirmation>('/api/backtest-agent/prepare', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
+}
+
+export async function executeBacktestSession(
+  request: BacktestAgentExecuteRequest
+): Promise<Backtest> {
+  return fetchJson<Backtest>('/api/backtest-agent/execute', {
+    method: 'POST',
+    body: JSON.stringify(request),
+  });
 }
 
 export { ApiError };
