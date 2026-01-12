@@ -3147,3 +3147,72 @@ Implemented the strategy confirmation screen that requires users to review parse
 - Implement backtest results visualization with equity curves (Carry-over)
 - Add optional parameter modification before execution
 - Add polling for backtest execution status (currently just redirects)
+
+---
+
+## 2026-01-12: Backtest Results Visualization Feature
+
+### What was done:
+Implemented the backtest results visualization feature with equity curve charts, enhanced summary metrics (including Sharpe ratio), and paginated trades table.
+
+### Features implemented:
+1. **EquityCurveChart component** (`frontend/src/components/EquityCurveChart.tsx`)
+   - Interactive line chart using Recharts library
+   - Shows cumulative PnL over time with trade index markers
+   - Dynamic color based on final PnL (green for profit, red for loss)
+   - Custom tooltip showing date, cumulative PnL, and trade number
+   - Reference line at $0 for easy visualization of breakeven
+   - Responsive design adapts to container width
+
+2. **Enhanced MetricsGrid** (`frontend/src/pages/BacktestDetailPage.tsx:86-155`)
+   - Added Sharpe Ratio display with trend indicator
+   - Added Average PnL per Trade metric
+   - Reorganized grid to 10 key metrics (5x2 on desktop)
+   - Metrics: Total Return, Total PnL, Win Rate, Sharpe Ratio, Trade Count, Winning Trades, Losing Trades, Max Drawdown, Avg PnL/Trade, Avg Holding Days
+
+3. **Paginated TradesTable** (`frontend/src/pages/BacktestDetailPage.tsx:159-279`)
+   - Displays 20 trades per page
+   - Previous/Next navigation buttons
+   - Shows "Showing X-Y of Z trades" indicator
+   - Page counter display
+   - Disabled buttons at bounds
+
+4. **Dependencies added**
+   - `recharts` - Industry-standard React charting library
+
+### PRD requirements met:
+- Generate equity curve for backtest results ✓ (EquityCurveChart component)
+- Compute and display summary metrics ✓ (MetricsGrid with 10 metrics including Sharpe ratio)
+- Display trades table with pagination ✓ (20 per page with navigation)
+- Store backtest artifacts for later viewing ✓ (Already implemented via BacktestStore in SQLite)
+
+### Test results:
+- Frontend tests: 38 passing (no new tests needed - visual components)
+- Backend tests: 660 passing (no changes to backend)
+- Frontend build: Successful
+- Backend typecheck: All source files pass (test file warnings pre-existing)
+
+### Files added:
+- `frontend/src/components/EquityCurveChart.tsx` - Recharts-based equity curve
+
+### Files modified:
+- `frontend/package.json` - Added recharts dependency
+- `frontend/package-lock.json` - Updated with recharts deps
+- `frontend/src/components/index.ts` - Export EquityCurveChart
+- `frontend/src/pages/BacktestDetailPage.tsx` - Integrated chart, enhanced metrics, added pagination
+
+### PRD feature marked as passing:
+- Carry-over: Backtest results visualization
+
+### Notes for next person:
+- Recharts is now available for other charts if needed (e.g., win rate over time, drawdown chart)
+- The EquityCurveChart expects data in format: `{ time: ISO string, cumulative_pnl: number, trade_index: number }`
+- The equity curve data is already computed by the backtest engine and stored in SQLite
+- Trades pagination is client-side (all trades loaded, sliced for display)
+- For very large backtests (1000+ trades), consider server-side pagination via API
+
+### Next steps for future sessions:
+- Implement dataset market list editing (Carry-over: Dataset editing)
+- Add CSV export functionality for trades
+- Add rerun/delete backtest functionality
+- Consider adding more chart visualizations (drawdown chart, monthly returns heatmap)

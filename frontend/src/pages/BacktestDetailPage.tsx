@@ -1,5 +1,7 @@
+import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useParams, useNavigate, Link } from 'react-router-dom';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import {
   ArrowLeft,
   TrendingUp,
@@ -15,8 +17,10 @@ import {
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { getBacktest } from '../api/client';
-import { Card, CardHeader, CardContent, Badge, Button, PageLoading } from '../components';
+import { Card, CardHeader, CardContent, Badge, Button, PageLoading, EquityCurveChart } from '../components';
 import type { BacktestTradeRecord, BacktestMetrics } from '../types';
+
+const TRADES_PER_PAGE = 20;
 
 function formatPercent(value: number | undefined): string {
   if (value === undefined) return '-';
@@ -76,8 +80,17 @@ function MetricCard({
   );
 }
 
+function formatSharpeRatio(value: number | undefined): string {
+  if (value === undefined || value === null) return '-';
+  return value.toFixed(2);
+}
+
 function MetricsGrid({ metrics }: { metrics: BacktestMetrics }) {
   const isWinning = metrics.total_pnl > 0;
+  const sharpeRatio = metrics.sharpe_ratio;
+  const sharpeTrend = sharpeRatio !== undefined && sharpeRatio !== null
+    ? (sharpeRatio > 1 ? 'up' : sharpeRatio < 0 ? 'down' : 'neutral')
+    : 'neutral';
 
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -100,9 +113,15 @@ function MetricsGrid({ metrics }: { metrics: BacktestMetrics }) {
         trend={metrics.win_rate > 0.5 ? 'up' : 'down'}
       />
       <MetricCard
+        label="Sharpe Ratio"
+        value={formatSharpeRatio(metrics.sharpe_ratio)}
+        icon={TrendingUp}
+        trend={sharpeTrend}
+      />
+      <MetricCard
         label="Trade Count"
         value={metrics.trade_count.toString()}
-        icon={TrendingUp}
+        icon={BarChart2}
       />
       <MetricCard
         label="Winning Trades"
@@ -123,6 +142,12 @@ function MetricsGrid({ metrics }: { metrics: BacktestMetrics }) {
         trend="down"
       />
       <MetricCard
+        label="Avg PnL/Trade"
+        value={formatCurrency(metrics.avg_trade_pnl)}
+        icon={DollarSign}
+        trend={metrics.avg_trade_pnl > 0 ? 'up' : 'down'}
+      />
+      <MetricCard
         label="Avg Holding Days"
         value={metrics.avg_holding_period_days.toFixed(1)}
         icon={Clock}
@@ -131,80 +156,125 @@ function MetricsGrid({ metrics }: { metrics: BacktestMetrics }) {
   );
 }
 
-function TradesTable({ trades }: { trades: BacktestTradeRecord[] }) {
+interface TradesTableProps {
+  trades: BacktestTradeRecord[];
+  page: number;
+  onPageChange: (page: number) => void;
+}
+
+function TradesTable({ trades, page, onPageChange }: TradesTableProps) {
+  const totalPages = Math.ceil(trades.length / TRADES_PER_PAGE);
+  const startIndex = page * TRADES_PER_PAGE;
+  const endIndex = Math.min(startIndex + TRADES_PER_PAGE, trades.length);
+  const paginatedTrades = trades.slice(startIndex, endIndex);
+
   return (
-    <div className="overflow-x-auto">
-      <table className="min-w-full divide-y divide-gray-200">
-        <thead className="bg-gray-50">
-          <tr>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-              Group / Market
-            </th>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-              Entry
-            </th>
-            <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-              Exit
-            </th>
-            <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
-              PnL
-            </th>
-          </tr>
-        </thead>
-        <tbody className="bg-white divide-y divide-gray-200">
-          {trades.map((trade) => {
-            const isWinner = (trade.net_pnl ?? 0) > 0;
-            return (
-              <tr key={trade.trade_id} className="hover:bg-gray-50">
-                <td className="px-4 py-3">
-                  <div className="text-sm font-medium text-gray-900 truncate max-w-[200px]">
-                    {trade.election_group_id}
-                  </div>
-                  <div className="text-xs text-gray-500 font-mono truncate max-w-[200px]">
-                    {trade.market_id}
-                  </div>
-                </td>
-                <td className="px-4 py-3">
-                  <div className="text-sm text-gray-900">
-                    ${trade.entry_price.toFixed(3)}
-                  </div>
-                  <div className="text-xs text-gray-500">
-                    {format(new Date(trade.entry_time), 'MMM d, yyyy')}
-                  </div>
-                </td>
-                <td className="px-4 py-3">
-                  {trade.exit_time ? (
-                    <>
-                      <div className="text-sm text-gray-900">
-                        ${trade.exit_price?.toFixed(3) ?? '-'}
-                      </div>
-                      <div className="text-xs text-gray-500">
-                        {format(new Date(trade.exit_time), 'MMM d, yyyy')}
-                      </div>
-                    </>
-                  ) : (
-                    <span className="text-sm text-gray-400">Open</span>
-                  )}
-                </td>
-                <td className="px-4 py-3 text-right">
-                  <div
-                    className={`text-sm font-medium ${
-                      isWinner ? 'text-green-600' : 'text-red-600'
-                    }`}
-                  >
-                    {formatCurrency(trade.net_pnl)}
-                  </div>
-                  {trade.fees && trade.fees > 0 && (
-                    <div className="text-xs text-gray-400">
-                      Fees: ${trade.fees.toFixed(4)}
+    <div>
+      <div className="overflow-x-auto">
+        <table className="min-w-full divide-y divide-gray-200">
+          <thead className="bg-gray-50">
+            <tr>
+              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Group / Market
+              </th>
+              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Entry
+              </th>
+              <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                Exit
+              </th>
+              <th className="px-4 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                PnL
+              </th>
+            </tr>
+          </thead>
+          <tbody className="bg-white divide-y divide-gray-200">
+            {paginatedTrades.map((trade) => {
+              const isWinner = (trade.net_pnl ?? 0) > 0;
+              return (
+                <tr key={trade.trade_id} className="hover:bg-gray-50">
+                  <td className="px-4 py-3">
+                    <div className="text-sm font-medium text-gray-900 truncate max-w-[200px]">
+                      {trade.election_group_id}
                     </div>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+                    <div className="text-xs text-gray-500 font-mono truncate max-w-[200px]">
+                      {trade.market_id}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="text-sm text-gray-900">
+                      ${trade.entry_price.toFixed(3)}
+                    </div>
+                    <div className="text-xs text-gray-500">
+                      {format(new Date(trade.entry_time), 'MMM d, yyyy')}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3">
+                    {trade.exit_time ? (
+                      <>
+                        <div className="text-sm text-gray-900">
+                          ${trade.exit_price?.toFixed(3) ?? '-'}
+                        </div>
+                        <div className="text-xs text-gray-500">
+                          {format(new Date(trade.exit_time), 'MMM d, yyyy')}
+                        </div>
+                      </>
+                    ) : (
+                      <span className="text-sm text-gray-400">Open</span>
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <div
+                      className={`text-sm font-medium ${
+                        isWinner ? 'text-green-600' : 'text-red-600'
+                      }`}
+                    >
+                      {formatCurrency(trade.net_pnl)}
+                    </div>
+                    {trade.fees && trade.fees > 0 && (
+                      <div className="text-xs text-gray-400">
+                        Fees: ${trade.fees.toFixed(4)}
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Pagination */}
+      {totalPages > 1 && (
+        <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200">
+          <div className="text-sm text-gray-500">
+            Showing {startIndex + 1}-{endIndex} of {trades.length} trades
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => onPageChange(page - 1)}
+              disabled={page === 0}
+            >
+              <ChevronLeft className="w-4 h-4" />
+              Previous
+            </Button>
+            <span className="text-sm text-gray-500">
+              Page {page + 1} of {totalPages}
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => onPageChange(page + 1)}
+              disabled={page >= totalPages - 1}
+            >
+              Next
+              <ChevronRight className="w-4 h-4" />
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -212,6 +282,7 @@ function TradesTable({ trades }: { trades: BacktestTradeRecord[] }) {
 export function BacktestDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [tradesPage, setTradesPage] = useState(0);
 
   const { data: backtest, isLoading, error } = useQuery({
     queryKey: ['backtest', id],
@@ -328,21 +399,14 @@ export function BacktestDetailPage() {
         </>
       )}
 
-      {/* Equity Curve Placeholder */}
+      {/* Equity Curve Chart */}
       {isCompleted && backtest.equity_curve && backtest.equity_curve.length > 0 && (
         <Card className="mb-6">
           <CardHeader>
             <h2 className="text-lg font-semibold text-gray-900">Equity Curve</h2>
           </CardHeader>
           <CardContent>
-            <div className="h-64 bg-gray-50 rounded flex items-center justify-center text-gray-400">
-              {/* In a real implementation, you'd use a charting library here */}
-              <div className="text-center">
-                <BarChart2 className="w-12 h-12 mx-auto mb-2" />
-                <p>Chart visualization would go here</p>
-                <p className="text-sm">({backtest.equity_curve.length} data points)</p>
-              </div>
-            </div>
+            <EquityCurveChart data={backtest.equity_curve} />
           </CardContent>
         </Card>
       )}
@@ -360,7 +424,11 @@ export function BacktestDetailPage() {
             </Button>
           </CardHeader>
           <CardContent className="p-0">
-            <TradesTable trades={backtest.trades} />
+            <TradesTable
+              trades={backtest.trades}
+              page={tradesPage}
+              onPageChange={setTradesPage}
+            />
           </CardContent>
         </Card>
       )}

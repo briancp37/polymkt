@@ -165,6 +165,6 @@
             "Display trades table with pagination",
             "Store backtest artifacts for later viewing"
         ],
-        "passes": false
+        "passes": true
     }
 ]
