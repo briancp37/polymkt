@@ -134,7 +134,7 @@
             "Record ingestion runs and analytics session lifecycle",
             "Enable future migration to Postgres without schema breakage"
         ],
-        "passes": false
+        "passes": true
     },
     {
         "category": "functional",

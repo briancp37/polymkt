@@ -1,14 +1,22 @@
-"""Metadata storage for run history and watermarks using SQLite."""
+"""Metadata storage for run history, watermarks, watchlists, and alerts using SQLite."""
 
 import json
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import structlog
 
-from polymkt.models.schemas import RunRecord
+from polymkt.models.schemas import (
+    RunRecord,
+    WatchlistSchema,
+    WatchlistItemSchema,
+    AlertSubscriptionSchema,
+    AlertSchema,
+    AnalyticsSessionSchema,
+)
 
 logger = structlog.get_logger()
 
@@ -48,6 +56,88 @@ class MetadataStore:
                     updated_at TEXT NOT NULL
                 )
             """)
+
+            # Watchlist tables for Sharp Money tracking
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS watchlists (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS watchlist_items (
+                    watchlist_id TEXT NOT NULL,
+                    wallet_address TEXT NOT NULL,
+                    added_at TEXT NOT NULL,
+                    notes TEXT,
+                    PRIMARY KEY (watchlist_id, wallet_address),
+                    FOREIGN KEY (watchlist_id) REFERENCES watchlists(id) ON DELETE CASCADE
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_watchlist_items_address
+                ON watchlist_items(wallet_address)
+            """)
+
+            # Alert subscription tables
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS alert_subscriptions (
+                    id TEXT PRIMARY KEY,
+                    watchlist_id TEXT NOT NULL,
+                    rule_type TEXT NOT NULL,
+                    rule_config TEXT NOT NULL,
+                    cooldown_seconds INTEGER DEFAULT 300,
+                    is_active INTEGER DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY (watchlist_id) REFERENCES watchlists(id) ON DELETE CASCADE
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS alerts (
+                    id TEXT PRIMARY KEY,
+                    subscription_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    market_id TEXT NOT NULL,
+                    wallet_address TEXT NOT NULL,
+                    trade_data TEXT,
+                    acknowledged INTEGER DEFAULT 0,
+                    acknowledged_at TEXT,
+                    triggered_at TEXT NOT NULL,
+                    FOREIGN KEY (subscription_id) REFERENCES alert_subscriptions(id)
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_alerts_subscription_triggered
+                ON alerts(subscription_id, triggered_at DESC)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_alerts_event_id
+                ON alerts(event_id)
+            """)
+
+            # Analytics session lifecycle tracking
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS analytics_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    last_activity_at TEXT NOT NULL,
+                    idle_timeout_minutes INTEGER DEFAULT 120,
+                    status TEXT NOT NULL,
+                    queries_run INTEGER DEFAULT 0,
+                    rows_accessed INTEGER DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_sessions_status_activity
+                ON analytics_sessions(status, last_activity_at DESC)
+            """)
+
             conn.commit()
         finally:
             conn.close()
@@ -201,3 +291,627 @@ class MetadataStore:
             return {row[0]: json.loads(row[1]) for row in cursor.fetchall()}
         finally:
             conn.close()
+
+    # =========================================================================
+    # Watchlist methods
+    # =========================================================================
+
+    def create_watchlist(self, name: str, description: str | None = None) -> WatchlistSchema:
+        """Create a new watchlist."""
+        watchlist_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO watchlists (id, name, description, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (watchlist_id, name, description, now, now),
+            )
+            conn.commit()
+            logger.info("watchlist_created", watchlist_id=watchlist_id, name=name)
+            return WatchlistSchema(
+                id=watchlist_id,
+                name=name,
+                description=description,
+                wallet_addresses=[],
+                created_at=datetime.fromisoformat(now),
+                updated_at=datetime.fromisoformat(now),
+            )
+        finally:
+            conn.close()
+
+    def get_watchlist(self, watchlist_id: str) -> WatchlistSchema | None:
+        """Get a watchlist by ID including all wallet addresses."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute(
+                "SELECT * FROM watchlists WHERE id = ?", (watchlist_id,)
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+
+            # Get wallet addresses
+            cursor = conn.execute(
+                "SELECT wallet_address FROM watchlist_items WHERE watchlist_id = ?",
+                (watchlist_id,),
+            )
+            addresses = [r[0] for r in cursor.fetchall()]
+
+            return WatchlistSchema(
+                id=row["id"],
+                name=row["name"],
+                description=row["description"],
+                wallet_addresses=addresses,
+                created_at=datetime.fromisoformat(row["created_at"]),
+                updated_at=datetime.fromisoformat(row["updated_at"]),
+            )
+        finally:
+            conn.close()
+
+    def list_watchlists(self) -> list[WatchlistSchema]:
+        """List all watchlists."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute("SELECT * FROM watchlists ORDER BY created_at DESC")
+            watchlists = []
+            for row in cursor.fetchall():
+                # Get wallet addresses for each watchlist
+                addr_cursor = conn.execute(
+                    "SELECT wallet_address FROM watchlist_items WHERE watchlist_id = ?",
+                    (row["id"],),
+                )
+                addresses = [r[0] for r in addr_cursor.fetchall()]
+                watchlists.append(
+                    WatchlistSchema(
+                        id=row["id"],
+                        name=row["name"],
+                        description=row["description"],
+                        wallet_addresses=addresses,
+                        created_at=datetime.fromisoformat(row["created_at"]),
+                        updated_at=datetime.fromisoformat(row["updated_at"]),
+                    )
+                )
+            return watchlists
+        finally:
+            conn.close()
+
+    def add_wallet_to_watchlist(
+        self, watchlist_id: str, wallet_address: str, notes: str | None = None
+    ) -> WatchlistItemSchema:
+        """Add a wallet address to a watchlist."""
+        # Normalize address to lowercase
+        normalized_address = wallet_address.lower()
+        now = datetime.now(timezone.utc).isoformat()
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO watchlist_items
+                (watchlist_id, wallet_address, added_at, notes)
+                VALUES (?, ?, ?, ?)
+                """,
+                (watchlist_id, normalized_address, now, notes),
+            )
+            # Update watchlist updated_at
+            conn.execute(
+                "UPDATE watchlists SET updated_at = ? WHERE id = ?",
+                (now, watchlist_id),
+            )
+            conn.commit()
+            logger.info(
+                "wallet_added_to_watchlist",
+                watchlist_id=watchlist_id,
+                wallet_address=normalized_address,
+            )
+            return WatchlistItemSchema(
+                watchlist_id=watchlist_id,
+                wallet_address=normalized_address,
+                added_at=datetime.fromisoformat(now),
+                notes=notes,
+            )
+        finally:
+            conn.close()
+
+    def remove_wallet_from_watchlist(
+        self, watchlist_id: str, wallet_address: str
+    ) -> bool:
+        """Remove a wallet address from a watchlist."""
+        normalized_address = wallet_address.lower()
+        now = datetime.now(timezone.utc).isoformat()
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.execute(
+                "DELETE FROM watchlist_items WHERE watchlist_id = ? AND wallet_address = ?",
+                (watchlist_id, normalized_address),
+            )
+            # Update watchlist updated_at
+            conn.execute(
+                "UPDATE watchlists SET updated_at = ? WHERE id = ?",
+                (now, watchlist_id),
+            )
+            conn.commit()
+            deleted = cursor.rowcount > 0
+            if deleted:
+                logger.info(
+                    "wallet_removed_from_watchlist",
+                    watchlist_id=watchlist_id,
+                    wallet_address=normalized_address,
+                )
+            return deleted
+        finally:
+            conn.close()
+
+    def is_wallet_watched(self, wallet_address: str) -> bool:
+        """Check if a wallet address is in any watchlist."""
+        normalized_address = wallet_address.lower()
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.execute(
+                "SELECT 1 FROM watchlist_items WHERE wallet_address = ? LIMIT 1",
+                (normalized_address,),
+            )
+            return cursor.fetchone() is not None
+        finally:
+            conn.close()
+
+    def get_watchlists_for_wallet(self, wallet_address: str) -> list[str]:
+        """Get all watchlist IDs that contain a wallet address."""
+        normalized_address = wallet_address.lower()
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.execute(
+                "SELECT watchlist_id FROM watchlist_items WHERE wallet_address = ?",
+                (normalized_address,),
+            )
+            return [row[0] for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def delete_watchlist(self, watchlist_id: str) -> bool:
+        """Delete a watchlist and all its items."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            # Delete items first (cascade should handle this, but be explicit)
+            conn.execute(
+                "DELETE FROM watchlist_items WHERE watchlist_id = ?", (watchlist_id,)
+            )
+            cursor = conn.execute(
+                "DELETE FROM watchlists WHERE id = ?", (watchlist_id,)
+            )
+            conn.commit()
+            deleted = cursor.rowcount > 0
+            if deleted:
+                logger.info("watchlist_deleted", watchlist_id=watchlist_id)
+            return deleted
+        finally:
+            conn.close()
+
+    # =========================================================================
+    # Alert subscription methods
+    # =========================================================================
+
+    def create_alert_subscription(
+        self,
+        watchlist_id: str,
+        rule_type: str,
+        rule_config: dict[str, Any],
+        cooldown_seconds: int = 300,
+    ) -> AlertSubscriptionSchema:
+        """Create an alert subscription for a watchlist."""
+        subscription_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO alert_subscriptions
+                (id, watchlist_id, rule_type, rule_config, cooldown_seconds,
+                 is_active, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    subscription_id,
+                    watchlist_id,
+                    rule_type,
+                    json.dumps(rule_config),
+                    cooldown_seconds,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            logger.info(
+                "alert_subscription_created",
+                subscription_id=subscription_id,
+                watchlist_id=watchlist_id,
+                rule_type=rule_type,
+            )
+            return AlertSubscriptionSchema(
+                id=subscription_id,
+                watchlist_id=watchlist_id,
+                rule_type=rule_type,
+                rule_config=rule_config,
+                cooldown_seconds=cooldown_seconds,
+                is_active=True,
+                created_at=datetime.fromisoformat(now),
+                updated_at=datetime.fromisoformat(now),
+            )
+        finally:
+            conn.close()
+
+    def get_alert_subscription(
+        self, subscription_id: str
+    ) -> AlertSubscriptionSchema | None:
+        """Get an alert subscription by ID."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute(
+                "SELECT * FROM alert_subscriptions WHERE id = ?", (subscription_id,)
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return self._row_to_alert_subscription(row)
+        finally:
+            conn.close()
+
+    def list_alert_subscriptions(
+        self, watchlist_id: str | None = None, active_only: bool = True
+    ) -> list[AlertSubscriptionSchema]:
+        """List alert subscriptions, optionally filtered by watchlist."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            query = "SELECT * FROM alert_subscriptions WHERE 1=1"
+            params: list[Any] = []
+
+            if watchlist_id:
+                query += " AND watchlist_id = ?"
+                params.append(watchlist_id)
+
+            if active_only:
+                query += " AND is_active = 1"
+
+            query += " ORDER BY created_at DESC"
+            cursor = conn.execute(query, params)
+            return [self._row_to_alert_subscription(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def _row_to_alert_subscription(
+        self, row: sqlite3.Row
+    ) -> AlertSubscriptionSchema:
+        """Convert a database row to an AlertSubscriptionSchema."""
+        return AlertSubscriptionSchema(
+            id=row["id"],
+            watchlist_id=row["watchlist_id"],
+            rule_type=row["rule_type"],
+            rule_config=json.loads(row["rule_config"]),
+            cooldown_seconds=row["cooldown_seconds"],
+            is_active=bool(row["is_active"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def set_alert_subscription_active(
+        self, subscription_id: str, is_active: bool
+    ) -> bool:
+        """Enable or disable an alert subscription."""
+        now = datetime.now(timezone.utc).isoformat()
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.execute(
+                "UPDATE alert_subscriptions SET is_active = ?, updated_at = ? WHERE id = ?",
+                (1 if is_active else 0, now, subscription_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    # =========================================================================
+    # Alert methods
+    # =========================================================================
+
+    def create_alert(
+        self,
+        subscription_id: str,
+        event_id: str,
+        market_id: str,
+        wallet_address: str,
+        trade_data: dict[str, Any] | None = None,
+    ) -> AlertSchema:
+        """Create a new alert."""
+        alert_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO alerts
+                (id, subscription_id, event_id, market_id, wallet_address,
+                 trade_data, triggered_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    alert_id,
+                    subscription_id,
+                    event_id,
+                    market_id,
+                    wallet_address.lower(),
+                    json.dumps(trade_data) if trade_data else None,
+                    now,
+                ),
+            )
+            conn.commit()
+            logger.info(
+                "alert_created",
+                alert_id=alert_id,
+                subscription_id=subscription_id,
+                event_id=event_id,
+            )
+            return AlertSchema(
+                id=alert_id,
+                subscription_id=subscription_id,
+                event_id=event_id,
+                market_id=market_id,
+                wallet_address=wallet_address.lower(),
+                trade_data=trade_data,
+                acknowledged=False,
+                acknowledged_at=None,
+                triggered_at=datetime.fromisoformat(now),
+            )
+        finally:
+            conn.close()
+
+    def alert_exists_for_event(self, event_id: str) -> bool:
+        """Check if an alert already exists for an event (deduplication)."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.execute(
+                "SELECT 1 FROM alerts WHERE event_id = ? LIMIT 1", (event_id,)
+            )
+            return cursor.fetchone() is not None
+        finally:
+            conn.close()
+
+    def list_alerts(
+        self,
+        subscription_id: str | None = None,
+        unacknowledged_only: bool = False,
+        limit: int = 100,
+    ) -> list[AlertSchema]:
+        """List alerts, optionally filtered."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            query = "SELECT * FROM alerts WHERE 1=1"
+            params: list[Any] = []
+
+            if subscription_id:
+                query += " AND subscription_id = ?"
+                params.append(subscription_id)
+
+            if unacknowledged_only:
+                query += " AND acknowledged = 0"
+
+            query += " ORDER BY triggered_at DESC LIMIT ?"
+            params.append(limit)
+
+            cursor = conn.execute(query, params)
+            return [self._row_to_alert(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def acknowledge_alert(self, alert_id: str) -> bool:
+        """Mark an alert as acknowledged."""
+        now = datetime.now(timezone.utc).isoformat()
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.execute(
+                "UPDATE alerts SET acknowledged = 1, acknowledged_at = ? WHERE id = ?",
+                (now, alert_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    def _row_to_alert(self, row: sqlite3.Row) -> AlertSchema:
+        """Convert a database row to an AlertSchema."""
+        return AlertSchema(
+            id=row["id"],
+            subscription_id=row["subscription_id"],
+            event_id=row["event_id"],
+            market_id=row["market_id"],
+            wallet_address=row["wallet_address"],
+            trade_data=json.loads(row["trade_data"]) if row["trade_data"] else None,
+            acknowledged=bool(row["acknowledged"]),
+            acknowledged_at=(
+                datetime.fromisoformat(row["acknowledged_at"])
+                if row["acknowledged_at"]
+                else None
+            ),
+            triggered_at=datetime.fromisoformat(row["triggered_at"]),
+        )
+
+    # =========================================================================
+    # Analytics session methods
+    # =========================================================================
+
+    def create_analytics_session(
+        self, idle_timeout_minutes: int = 120
+    ) -> AnalyticsSessionSchema:
+        """Create a new analytics session."""
+        session_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO analytics_sessions
+                (session_id, started_at, last_activity_at, idle_timeout_minutes,
+                 status, queries_run, rows_accessed, updated_at)
+                VALUES (?, ?, ?, ?, 'active', 0, 0, ?)
+                """,
+                (session_id, now, now, idle_timeout_minutes, now),
+            )
+            conn.commit()
+            logger.info("analytics_session_created", session_id=session_id)
+            return AnalyticsSessionSchema(
+                session_id=session_id,
+                started_at=datetime.fromisoformat(now),
+                ended_at=None,
+                last_activity_at=datetime.fromisoformat(now),
+                idle_timeout_minutes=idle_timeout_minutes,
+                status="active",
+                queries_run=0,
+                rows_accessed=0,
+                updated_at=datetime.fromisoformat(now),
+            )
+        finally:
+            conn.close()
+
+    def get_analytics_session(
+        self, session_id: str
+    ) -> AnalyticsSessionSchema | None:
+        """Get an analytics session by ID."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute(
+                "SELECT * FROM analytics_sessions WHERE session_id = ?", (session_id,)
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return None
+            return self._row_to_analytics_session(row)
+        finally:
+            conn.close()
+
+    def update_analytics_session_activity(
+        self,
+        session_id: str,
+        queries_increment: int = 1,
+        rows_increment: int = 0,
+    ) -> bool:
+        """Update session activity (touch last_activity_at, increment counters)."""
+        now = datetime.now(timezone.utc).isoformat()
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE analytics_sessions
+                SET last_activity_at = ?,
+                    queries_run = queries_run + ?,
+                    rows_accessed = rows_accessed + ?,
+                    updated_at = ?
+                WHERE session_id = ? AND status = 'active'
+                """,
+                (now, queries_increment, rows_increment, now, session_id),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    def end_analytics_session(self, session_id: str) -> bool:
+        """End an analytics session."""
+        now = datetime.now(timezone.utc).isoformat()
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE analytics_sessions
+                SET ended_at = ?, status = 'ended', updated_at = ?
+                WHERE session_id = ? AND status = 'active'
+                """,
+                (now, now, session_id),
+            )
+            conn.commit()
+            if cursor.rowcount > 0:
+                logger.info("analytics_session_ended", session_id=session_id)
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    def list_active_analytics_sessions(self) -> list[AnalyticsSessionSchema]:
+        """List all active analytics sessions."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute(
+                "SELECT * FROM analytics_sessions WHERE status = 'active' "
+                "ORDER BY last_activity_at DESC"
+            )
+            return [self._row_to_analytics_session(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def cleanup_expired_analytics_sessions(self) -> int:
+        """End sessions that have exceeded their idle timeout. Returns count cleaned."""
+        now = datetime.now(timezone.utc)
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            # Find expired sessions
+            cursor = conn.execute(
+                "SELECT session_id, last_activity_at, idle_timeout_minutes "
+                "FROM analytics_sessions WHERE status = 'active'"
+            )
+            expired_ids = []
+            for row in cursor.fetchall():
+                last_activity = datetime.fromisoformat(row["last_activity_at"])
+                timeout_minutes = row["idle_timeout_minutes"]
+                elapsed_minutes = (now - last_activity).total_seconds() / 60
+                if elapsed_minutes > timeout_minutes:
+                    expired_ids.append(row["session_id"])
+
+            # End expired sessions
+            if expired_ids:
+                now_str = now.isoformat()
+                for session_id in expired_ids:
+                    conn.execute(
+                        "UPDATE analytics_sessions "
+                        "SET ended_at = ?, status = 'expired', updated_at = ? "
+                        "WHERE session_id = ?",
+                        (now_str, now_str, session_id),
+                    )
+                conn.commit()
+                logger.info(
+                    "analytics_sessions_expired", count=len(expired_ids)
+                )
+
+            return len(expired_ids)
+        finally:
+            conn.close()
+
+    def _row_to_analytics_session(
+        self, row: sqlite3.Row
+    ) -> AnalyticsSessionSchema:
+        """Convert a database row to an AnalyticsSessionSchema."""
+        return AnalyticsSessionSchema(
+            session_id=row["session_id"],
+            started_at=datetime.fromisoformat(row["started_at"]),
+            ended_at=(
+                datetime.fromisoformat(row["ended_at"]) if row["ended_at"] else None
+            ),
+            last_activity_at=datetime.fromisoformat(row["last_activity_at"]),
+            idle_timeout_minutes=row["idle_timeout_minutes"],
+            status=row["status"],
+            queries_run=row["queries_run"],
+            rows_accessed=row["rows_accessed"],
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )

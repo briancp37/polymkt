@@ -1010,3 +1010,135 @@ class BacktestAgentResultSchema(BaseModel):
         default_factory=list, description="Equity curve data points"
     )
     error_message: str | None = Field(None, description="Error message if failed")
+
+
+# =============================================================================
+# Ops Metadata schemas for watchlists, alerts, and analytics sessions
+# =============================================================================
+
+
+class WatchlistItemSchema(BaseModel):
+    """A wallet address in a watchlist."""
+
+    watchlist_id: str = Field(..., description="Parent watchlist ID")
+    wallet_address: str = Field(..., description="Wallet address (lowercase)")
+    added_at: datetime = Field(..., description="When the wallet was added")
+    notes: str | None = Field(None, description="Optional notes about this wallet")
+
+
+class WatchlistSchema(BaseModel):
+    """A watchlist for tracking wallet addresses."""
+
+    id: str = Field(..., description="Watchlist ID")
+    name: str = Field(..., description="Watchlist name")
+    description: str | None = Field(None, description="Watchlist description")
+    wallet_addresses: list[str] = Field(
+        default_factory=list, description="Wallet addresses in this watchlist"
+    )
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+
+
+class WatchlistCreateRequest(BaseModel):
+    """Request to create a new watchlist."""
+
+    name: str = Field(..., min_length=1, max_length=255, description="Watchlist name")
+    description: str | None = Field(None, max_length=1000, description="Description")
+    wallet_addresses: list[str] = Field(
+        default_factory=list, description="Initial wallet addresses"
+    )
+
+
+class WatchlistAddWalletRequest(BaseModel):
+    """Request to add a wallet to a watchlist."""
+
+    wallet_address: str = Field(
+        ..., pattern=r"^0x[a-fA-F0-9]{40}$", description="Ethereum wallet address"
+    )
+    notes: str | None = Field(None, max_length=500, description="Optional notes")
+
+
+class AlertSubscriptionSchema(BaseModel):
+    """An alert subscription tied to a watchlist."""
+
+    id: str = Field(..., description="Subscription ID")
+    watchlist_id: str = Field(..., description="Associated watchlist ID")
+    rule_type: str = Field(
+        ..., description="Alert rule type (e.g., 'trade', 'large_trade')"
+    )
+    rule_config: dict[str, Any] = Field(
+        default_factory=dict, description="Rule configuration (thresholds, etc.)"
+    )
+    cooldown_seconds: int = Field(
+        300, description="Minimum seconds between alerts for same wallet/market"
+    )
+    is_active: bool = Field(True, description="Whether the subscription is active")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+
+
+class AlertSubscriptionCreateRequest(BaseModel):
+    """Request to create an alert subscription."""
+
+    watchlist_id: str = Field(..., description="Watchlist to monitor")
+    rule_type: str = Field(
+        "trade", description="Alert rule type (trade, large_trade, price_change)"
+    )
+    rule_config: dict[str, Any] = Field(
+        default_factory=dict, description="Rule configuration"
+    )
+    cooldown_seconds: int = Field(
+        300, ge=0, le=86400, description="Cooldown between alerts (seconds)"
+    )
+
+
+class AlertSchema(BaseModel):
+    """An alert triggered by a subscription."""
+
+    id: str = Field(..., description="Alert ID")
+    subscription_id: str = Field(..., description="Subscription that triggered this")
+    event_id: str = Field(..., description="Event ID that triggered the alert")
+    market_id: str = Field(..., description="Market ID")
+    wallet_address: str = Field(..., description="Wallet address that triggered")
+    trade_data: dict[str, Any] | None = Field(
+        None, description="Trade details (price, amount, etc.)"
+    )
+    acknowledged: bool = Field(False, description="Whether alert has been acknowledged")
+    acknowledged_at: datetime | None = Field(
+        None, description="When alert was acknowledged"
+    )
+    triggered_at: datetime = Field(..., description="When alert was triggered")
+
+
+class AlertListResponse(BaseModel):
+    """Response for listing alerts."""
+
+    alerts: list[AlertSchema] = Field(..., description="List of alerts")
+    count: int = Field(..., description="Number of alerts returned")
+    has_more: bool = Field(..., description="Whether more alerts exist")
+
+
+class AnalyticsSessionSchema(BaseModel):
+    """An analytics session with idle TTL tracking."""
+
+    session_id: str = Field(..., description="Session ID")
+    started_at: datetime = Field(..., description="Session start time")
+    ended_at: datetime | None = Field(None, description="Session end time")
+    last_activity_at: datetime = Field(..., description="Last activity timestamp")
+    idle_timeout_minutes: int = Field(
+        120, description="Minutes of inactivity before auto-termination"
+    )
+    status: str = Field(
+        "active", description="Session status (active, ended, expired)"
+    )
+    queries_run: int = Field(0, description="Number of queries executed")
+    rows_accessed: int = Field(0, description="Total rows accessed")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+
+
+class AnalyticsSessionCreateRequest(BaseModel):
+    """Request to create an analytics session."""
+
+    idle_timeout_minutes: int = Field(
+        120, ge=1, le=1440, description="Idle timeout in minutes (max 24 hours)"
+    )

@@ -3289,3 +3289,91 @@ Implemented the dataset editing feature that allows users to modify existing dat
 - Bootstrap cloud data lake feature (S3/Parquet)
 - INGEST_MODE and ANALYTICS_MODE runtime controls
 - Sharp money v1 watchlist feature
+
+---
+
+## 2026-01-12: Ops Metadata and Control Plane Feature
+
+### What was done:
+Implemented the ops metadata and control plane storage layer that provides SQLite-backed persistence for watchlists, alert subscriptions, alerts, and analytics session lifecycle tracking.
+
+### Features implemented:
+
+1. **Watchlist Storage** (`src/polymkt/storage/metadata.py:295-495`)
+   - `watchlists` table for named watchlist collections
+   - `watchlist_items` table for wallet addresses with notes
+   - Index on `wallet_address` for fast lookups
+   - Methods: `create_watchlist()`, `get_watchlist()`, `list_watchlists()`, `delete_watchlist()`
+   - Methods: `add_wallet_to_watchlist()`, `remove_wallet_from_watchlist()`
+   - Methods: `is_wallet_watched()`, `get_watchlists_for_wallet()`
+   - Wallet addresses normalized to lowercase
+
+2. **Alert Subscription Storage** (`src/polymkt/storage/metadata.py:497-620`)
+   - `alert_subscriptions` table with rule type and config
+   - Supports cooldown periods to prevent spam
+   - Active/inactive toggle for subscriptions
+   - Methods: `create_alert_subscription()`, `get_alert_subscription()`
+   - Methods: `list_alert_subscriptions()`, `set_alert_subscription_active()`
+
+3. **Alert Storage** (`src/polymkt/storage/metadata.py:622-747`)
+   - `alerts` table for triggered alerts
+   - Index on `event_id` for deduplication
+   - Index on `(subscription_id, triggered_at)` for efficient listing
+   - Methods: `create_alert()`, `alert_exists_for_event()` (deduplication)
+   - Methods: `list_alerts()`, `acknowledge_alert()`
+
+4. **Analytics Session Lifecycle** (`src/polymkt/storage/metadata.py:749-917`)
+   - `analytics_sessions` table with TTL tracking
+   - Index on `(status, last_activity_at)` for cleanup queries
+   - 120-minute default idle timeout
+   - Tracks queries_run and rows_accessed metrics
+   - Methods: `create_analytics_session()`, `get_analytics_session()`
+   - Methods: `update_analytics_session_activity()`, `end_analytics_session()`
+   - Methods: `list_active_analytics_sessions()`, `cleanup_expired_analytics_sessions()`
+
+5. **Pydantic Schemas** (`src/polymkt/models/schemas.py:1015-1144`)
+   - `WatchlistSchema`, `WatchlistItemSchema`, `WatchlistCreateRequest`, `WatchlistAddWalletRequest`
+   - `AlertSubscriptionSchema`, `AlertSubscriptionCreateRequest`
+   - `AlertSchema`, `AlertListResponse`
+   - `AnalyticsSessionSchema`, `AnalyticsSessionCreateRequest`
+
+### PRD requirements met:
+- Use SQLite to store watermarks, run history, mode state, and TTLs ✓
+  - Watermarks and run history already existed
+  - Analytics sessions now track TTLs
+- Persist alert subscriptions and watchlists ✓
+  - Full CRUD for watchlists with wallet items
+  - Full CRUD for alert subscriptions
+- Record ingestion runs and analytics session lifecycle ✓
+  - Run history already existed (RunRecord)
+  - Analytics sessions now tracked with lifecycle methods
+- Enable future migration to Postgres without schema breakage ✓
+  - Uses text-based UUIDs (not auto-increment)
+  - ISO 8601 timestamps stored as TEXT
+  - JSON stored as TEXT (compatible with JSONB)
+  - No SQLite-specific features like `AUTOINCREMENT`
+
+### Test results:
+- Backend tests: 660 passing
+- No new test file errors in source code (only pre-existing test file warnings)
+
+### Files modified:
+- `src/polymkt/storage/metadata.py` - Added 6 new tables and ~600 lines of CRUD methods
+- `src/polymkt/models/schemas.py` - Added 10 new Pydantic schemas
+
+### PRD feature marked as passing:
+- Ops metadata and control plane
+
+### Notes for next person:
+- The MetadataStore now handles watchlists, alerts, and analytics sessions
+- Wallet addresses are automatically normalized to lowercase
+- Alert deduplication is done by `event_id` - call `alert_exists_for_event()` before creating
+- Analytics sessions auto-expire via `cleanup_expired_analytics_sessions()` - call periodically
+- API endpoints for these entities should be added as part of "Sharp Money v1" and "Alerting system" features
+- All schemas are designed for Postgres migration - no SQLite-specific features used
+
+### Next steps for future sessions:
+- Sharp money v1 feature can now use the watchlist storage
+- Alerting system can now use the alert subscription and alert storage
+- INGEST_MODE/ANALYTICS_MODE feature should add mode_state table
+- Add API endpoints when implementing user-facing features
