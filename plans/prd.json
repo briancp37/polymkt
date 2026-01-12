@@ -144,7 +144,7 @@
             "Allow editing dataset definitions without rebuilding all data",
             "Ensure downstream jobs respect updated dataset definitions"
         ],
-        "passes": false
+        "passes": true
     },
     {
         "category": "functional",

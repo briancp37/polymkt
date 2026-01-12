@@ -196,7 +196,8 @@ class DatasetStore:
             # Get paginated results
             cursor = conn.execute(
                 """
-                SELECT id, name, description, market_ids, created_at, updated_at
+                SELECT id, name, description, market_ids, excluded_market_ids,
+                       created_at, updated_at
                 FROM datasets
                 ORDER BY updated_at DESC
                 LIMIT ? OFFSET ?
@@ -226,11 +227,13 @@ class DatasetStore:
     def _row_to_summary(self, row: sqlite3.Row) -> DatasetSummary:
         """Convert a database row to a DatasetSummary."""
         market_ids = json.loads(row["market_ids"])
+        excluded_market_ids = json.loads(row["excluded_market_ids"])
         return DatasetSummary(
             id=row["id"],
             name=row["name"],
             description=row["description"],
             market_count=len(market_ids),
+            excluded_count=len(excluded_market_ids),
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )

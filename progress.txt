@@ -3216,3 +3216,76 @@ Implemented the backtest results visualization feature with equity curve charts,
 - Add CSV export functionality for trades
 - Add rerun/delete backtest functionality
 - Consider adding more chart visualizations (drawdown chart, monthly returns heatmap)
+
+---
+
+## 2026-01-12: Dataset Editing Feature
+
+### What was done:
+Implemented the dataset editing feature that allows users to modify existing dataset definitions including name, description, and market inclusion/exclusion lists without rebuilding any data.
+
+### Features implemented:
+1. **Backend: DatasetSummary schema fix** (`src/polymkt/models/schemas.py:330`)
+   - Added `excluded_count` field to DatasetSummary
+   - Frontend was expecting this field but backend wasn't providing it
+
+2. **Backend: Storage layer update** (`src/polymkt/storage/datasets.py:197-238`)
+   - Updated SQL query to fetch `excluded_market_ids` in list queries
+   - Updated `_row_to_summary` to compute `excluded_count`
+
+3. **EditDatasetPage** (`frontend/src/pages/EditDatasetPage.tsx`)
+   - Loads existing dataset data and pre-populates form
+   - Shows all markets with checkboxes for include/exclude toggle
+   - Select All / Deselect All buttons for bulk operations
+   - Editable name and description fields
+   - Confirmation modal before saving changes
+   - Invalidates query cache on successful save
+
+4. **DatasetDetailPage updates** (`frontend/src/pages/DatasetDetailPage.tsx`)
+   - Edit button navigates to `/datasets/:id/edit`
+   - Delete button shows confirmation modal with danger variant
+   - Run Backtest button navigates to `/backtests/new?dataset=${id}`
+   - Delete mutation with cache invalidation
+
+5. **CreateBacktestPage updates** (`frontend/src/pages/CreateBacktestPage.tsx`)
+   - Reads `dataset` query parameter from URL
+   - Pre-selects dataset when navigating from "Run Backtest" button
+
+6. **Routing updates** (`frontend/src/App.tsx`)
+   - Added route `/datasets/:id/edit` for EditDatasetPage
+
+### PRD requirements met:
+- Persist dataset definitions including included and excluded market ids ✓ (was already implemented)
+- Allow editing dataset definitions without rebuilding all data ✓ (EditDatasetPage)
+- Ensure downstream jobs respect updated dataset definitions ✓ (backtests load at runtime)
+
+### Test results:
+- Frontend tests: 38 passing
+- Backend tests: 660 passing
+- Frontend build: Successful
+
+### Files added:
+- `frontend/src/pages/EditDatasetPage.tsx` - Dataset editing page
+
+### Files modified:
+- `src/polymkt/models/schemas.py` - Added excluded_count to DatasetSummary
+- `src/polymkt/storage/datasets.py` - Updated list query and summary mapping
+- `frontend/src/App.tsx` - Added edit route
+- `frontend/src/pages/index.ts` - Export EditDatasetPage
+- `frontend/src/pages/DatasetDetailPage.tsx` - Wired up Edit/Delete/RunBacktest buttons
+- `frontend/src/pages/CreateBacktestPage.tsx` - Added dataset query param support
+
+### PRD feature marked as passing:
+- Carry-over: Each Dataset persists its market list (included/excluded) and can be edited later
+
+### Notes for next person:
+- The EditDatasetPage only shows markets already in the dataset (included or excluded)
+- To add new markets to an existing dataset, you would need to enhance the page with search functionality
+- The delete operation cascades through React Query cache invalidation
+- All three carry-over features are now complete: Dataset editing, Strategy confirmation, Backtest visualization
+
+### Next steps for future sessions:
+- Consider adding market search to EditDatasetPage for adding new markets
+- Bootstrap cloud data lake feature (S3/Parquet)
+- INGEST_MODE and ANALYTICS_MODE runtime controls
+- Sharp money v1 watchlist feature

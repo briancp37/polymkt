@@ -1,19 +1,46 @@
-import { useQuery } from '@tanstack/react-query';
+import { useState } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { ArrowLeft, Database, Calendar, Tag, Pencil, Trash2, Play } from 'lucide-react';
 import { format } from 'date-fns';
-import { getDataset } from '../api/client';
-import { Card, CardHeader, CardContent, Badge, Button, PageLoading } from '../components';
+import { getDataset, deleteDataset } from '../api/client';
+import { Card, CardHeader, CardContent, Badge, Button, PageLoading, ConfirmationModal } from '../components';
 
 export function DatasetDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [showDeleteConfirmation, setShowDeleteConfirmation] = useState(false);
 
   const { data: dataset, isLoading, error } = useQuery({
     queryKey: ['dataset', id],
     queryFn: () => getDataset(id!),
     enabled: !!id,
   });
+
+  const deleteMutation = useMutation({
+    mutationFn: () => deleteDataset(id!),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['datasets'] });
+      navigate('/datasets');
+    },
+  });
+
+  const handleEdit = () => {
+    navigate(`/datasets/${id}/edit`);
+  };
+
+  const handleRunBacktest = () => {
+    navigate(`/backtests/new?dataset=${id}`);
+  };
+
+  const handleDeleteClick = () => {
+    setShowDeleteConfirmation(true);
+  };
+
+  const handleConfirmDelete = () => {
+    deleteMutation.mutate();
+  };
 
   if (isLoading) {
     return <PageLoading />;
@@ -53,11 +80,11 @@ export function DatasetDetailPage() {
           )}
         </div>
         <div className="flex gap-2">
-          <Button variant="secondary">
+          <Button variant="secondary" onClick={handleEdit}>
             <Pencil className="w-4 h-4 mr-2" />
             Edit
           </Button>
-          <Button>
+          <Button onClick={handleRunBacktest}>
             <Play className="w-4 h-4 mr-2" />
             Run Backtest
           </Button>
@@ -226,13 +253,34 @@ export function DatasetDetailPage() {
                 This action cannot be undone. All backtests using this dataset will remain.
               </p>
             </div>
-            <Button variant="danger">
+            <Button variant="danger" onClick={handleDeleteClick}>
               <Trash2 className="w-4 h-4 mr-2" />
               Delete Dataset
             </Button>
           </div>
         </CardContent>
       </Card>
+
+      {/* Delete Confirmation Modal */}
+      <ConfirmationModal
+        isOpen={showDeleteConfirmation}
+        onClose={() => setShowDeleteConfirmation(false)}
+        onConfirm={handleConfirmDelete}
+        title="Delete Dataset"
+        confirmText="Delete"
+        variant="danger"
+        isLoading={deleteMutation.isPending}
+      >
+        <div className="space-y-4">
+          <p className="text-gray-700">
+            Are you sure you want to delete <strong>{dataset.name}</strong>?
+          </p>
+          <p className="text-sm text-gray-500">
+            This action cannot be undone. Backtests that used this dataset will remain,
+            but you will not be able to run new backtests with this dataset.
+          </p>
+        </div>
+      </ConfirmationModal>
     </div>
   );
 }

@@ -327,6 +327,7 @@ class DatasetSummary(BaseModel):
     name: str = Field(..., description="Dataset name")
     description: str | None = Field(None, description="Dataset description")
     market_count: int = Field(..., description="Number of included markets")
+    excluded_count: int = Field(..., description="Number of excluded markets")
     created_at: datetime = Field(..., description="Creation timestamp")
     updated_at: datetime = Field(..., description="Last update timestamp")
 

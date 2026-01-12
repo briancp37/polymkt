@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import { ArrowLeft, Play, Database, AlertCircle } from 'lucide-react';
 import {
@@ -55,10 +55,12 @@ function DatasetSelector({
 
 export function CreateBacktestPage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const preselectedDatasetId = searchParams.get('dataset');
 
   // Form state
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(
-    null
+    preselectedDatasetId
   );
   const [strategyText, setStrategyText] = useState('');
 
@@ -73,6 +75,13 @@ export function CreateBacktestPage() {
     queryKey: ['datasets'],
     queryFn: () => listDatasets(),
   });
+
+  // Update selected dataset when preselected changes (e.g., from URL)
+  useEffect(() => {
+    if (preselectedDatasetId && !selectedDatasetId) {
+      setSelectedDatasetId(preselectedDatasetId);
+    }
+  }, [preselectedDatasetId, selectedDatasetId]);
 
   // Prepare mutation (parses strategy and gets confirmation)
   const prepareMutation = useMutation({
