@@ -767,6 +767,113 @@ def _join_events_tags_to_markets(
         conn.close()
 
 
+def _generate_trade_alerts(
+    trades_table: pa.Table,
+    metadata_store: MetadataStore,
+    run_logger: Any,
+) -> int:
+    """
+    Generate alerts for trades from watchlisted wallets.
+
+    Checks each trade's maker and taker addresses against active watchlist
+    subscriptions. Creates alerts for matching trades with deduplication
+    via transaction_hash.
+
+    Args:
+        trades_table: PyArrow table of newly written trades
+        metadata_store: MetadataStore instance for watchlist/alert operations
+        run_logger: Structured logger with run_id context
+
+    Returns:
+        Number of alerts generated
+    """
+    if trades_table.num_rows == 0:
+        return 0
+
+    # Get active subscriptions with watchlist type
+    subscriptions = metadata_store.list_alert_subscriptions(
+        rule_type="watchlist_trade", is_active=True
+    )
+
+    if not subscriptions:
+        return 0
+
+    alerts_created = 0
+
+    # Build mapping of watchlist_id -> watched addresses
+    watchlist_addresses: dict[str, set[str]] = {}
+    for sub in subscriptions:
+        if sub.watchlist_id and sub.watchlist_id not in watchlist_addresses:
+            items = metadata_store.list_watchlist_items(sub.watchlist_id)
+            watchlist_addresses[sub.watchlist_id] = {
+                item.wallet_address.lower() for item in items
+            }
+
+    # Extract trade data for checking
+    maker_col = trades_table.column("maker").to_pylist()
+    taker_col = trades_table.column("taker").to_pylist()
+    tx_hash_col = trades_table.column("transaction_hash").to_pylist()
+    market_id_col = trades_table.column("market_id").to_pylist()
+    timestamp_col = trades_table.column("timestamp").to_pylist()
+    side_col = trades_table.column("side").to_pylist()
+    size_col = trades_table.column("size").to_pylist()
+    price_col = trades_table.column("price").to_pylist()
+
+    for i in range(trades_table.num_rows):
+        maker = maker_col[i].lower() if maker_col[i] else ""
+        taker = taker_col[i].lower() if taker_col[i] else ""
+        tx_hash = tx_hash_col[i]
+
+        for sub in subscriptions:
+            if not sub.watchlist_id:
+                continue
+
+            watched = watchlist_addresses.get(sub.watchlist_id, set())
+            matched_address = None
+            match_side = None
+
+            if maker in watched:
+                matched_address = maker
+                match_side = "maker"
+            elif taker in watched:
+                matched_address = taker
+                match_side = "taker"
+
+            if matched_address:
+                # Check for duplicate alert (same tx_hash and subscription)
+                existing = metadata_store.list_alerts(
+                    subscription_id=sub.id, limit=1000
+                )
+                is_duplicate = any(
+                    a.trade_data and a.trade_data.get("transaction_hash") == tx_hash
+                    for a in existing
+                )
+
+                if not is_duplicate:
+                    trade_data = {
+                        "transaction_hash": tx_hash,
+                        "match_side": match_side,
+                        "timestamp": str(timestamp_col[i]),
+                        "side": side_col[i],
+                        "size": str(size_col[i]),
+                        "price": str(price_col[i]),
+                    }
+                    # Use tx_hash as event_id for deduplication
+                    metadata_store.create_alert(
+                        subscription_id=sub.id,
+                        event_id=tx_hash,
+                        market_id=market_id_col[i],
+                        wallet_address=matched_address,
+                        trade_data=trade_data,
+                    )
+                    alerts_created += 1
+
+    if alerts_created > 0:
+        run_logger.info("trade_alerts_generated", count=alerts_created)
+
+    return alerts_created
+
+
 def run_update(
     markets_csv: Path | None = None,
     trades_csv: Path | None = None,
@@ -900,6 +1007,9 @@ def run_update(
                     watermarks_after["trades"] = new_watermark
             elif trades_watermark:
                 watermarks_after["trades"] = trades_watermark
+
+            # Generate alerts for watchlisted wallet trades
+            _generate_trade_alerts(trades_table, metadata_store, run_logger)
 
         else:
             run_logger.warning("csv_not_found", entity="trades", path=str(trades_csv))

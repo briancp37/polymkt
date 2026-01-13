@@ -381,6 +381,33 @@ class MetadataStore:
         finally:
             conn.close()
 
+    def list_watchlist_items(self, watchlist_id: str) -> list[WatchlistItemSchema]:
+        """List all items (wallet addresses) in a watchlist."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute(
+                """
+                SELECT watchlist_id, wallet_address, added_at, notes
+                FROM watchlist_items WHERE watchlist_id = ?
+                ORDER BY added_at DESC
+                """,
+                (watchlist_id,),
+            )
+            items = []
+            for row in cursor.fetchall():
+                items.append(
+                    WatchlistItemSchema(
+                        watchlist_id=row["watchlist_id"],
+                        wallet_address=row["wallet_address"],
+                        added_at=datetime.fromisoformat(row["added_at"]),
+                        notes=row["notes"],
+                    )
+                )
+            return items
+        finally:
+            conn.close()
+
     def add_wallet_to_watchlist(
         self, watchlist_id: str, wallet_address: str, notes: str | None = None
     ) -> WatchlistItemSchema:
@@ -566,9 +593,12 @@ class MetadataStore:
             conn.close()
 
     def list_alert_subscriptions(
-        self, watchlist_id: str | None = None, active_only: bool = True
+        self,
+        watchlist_id: str | None = None,
+        rule_type: str | None = None,
+        is_active: bool | None = True,
     ) -> list[AlertSubscriptionSchema]:
-        """List alert subscriptions, optionally filtered by watchlist."""
+        """List alert subscriptions, optionally filtered by watchlist and/or rule type."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
@@ -579,8 +609,13 @@ class MetadataStore:
                 query += " AND watchlist_id = ?"
                 params.append(watchlist_id)
 
-            if active_only:
-                query += " AND is_active = 1"
+            if rule_type:
+                query += " AND rule_type = ?"
+                params.append(rule_type)
+
+            if is_active is not None:
+                query += " AND is_active = ?"
+                params.append(1 if is_active else 0)
 
             query += " ORDER BY created_at DESC"
             cursor = conn.execute(query, params)

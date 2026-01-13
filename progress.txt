@@ -3377,3 +3377,77 @@ Implemented the ops metadata and control plane storage layer that provides SQLit
 - Alerting system can now use the alert subscription and alert storage
 - INGEST_MODE/ANALYTICS_MODE feature should add mode_state table
 - Add API endpoints when implementing user-facing features
+
+---
+
+## 2026-01-12: Sharp Money v1 Based on Static Watchlist
+
+### What was done:
+Implemented the Sharp Money v1 feature with static watchlist support, including API endpoints for watchlist and alert management, and automatic alert generation when trades involve watchlisted wallets.
+
+### Features implemented:
+
+1. **Sharp Money API Endpoints** (`src/polymkt/api/main.py:3003-3313`)
+   - `POST /api/sharp-money/initialize` - Initialize default Sharp Money watchlist with predefined addresses
+   - `GET /api/sharp-money/watchlists` - List all watchlists
+   - `POST /api/sharp-money/watchlists` - Create new watchlist
+   - `GET /api/sharp-money/watchlists/{id}` - Get watchlist details with wallet addresses
+   - `DELETE /api/sharp-money/watchlists/{id}` - Delete watchlist
+   - `POST /api/sharp-money/watchlists/{id}/wallets` - Add wallet to watchlist
+   - `DELETE /api/sharp-money/watchlists/{id}/wallets/{address}` - Remove wallet from watchlist
+   - `GET /api/sharp-money/subscriptions` - List alert subscriptions
+   - `POST /api/sharp-money/subscriptions` - Create alert subscription
+   - `PATCH /api/sharp-money/subscriptions/{id}/active` - Toggle subscription active status
+   - `GET /api/sharp-money/alerts` - List alerts with filters
+   - `POST /api/sharp-money/alerts/{id}/acknowledge` - Acknowledge alert
+
+2. **Default Sharp Money Addresses**
+   - `0x63ce342161250d705dc0b16df89036c8e5f9ba9a`
+   - `0x5388bc8cb72eb19a3bec0e8f3db6a77f7cd54d5a`
+
+3. **Trade Alert Generation** (`src/polymkt/pipeline/update.py:770-874`)
+   - `_generate_trade_alerts()` function checks new trades against active watchlist subscriptions
+   - Checks both maker and taker addresses against watched wallets
+   - Deduplicates alerts by transaction hash
+   - Records trade data including side, size, price, timestamp
+   - Automatically invoked after trades are written during update pipeline
+
+4. **Enhanced MetadataStore Methods** (`src/polymkt/storage/metadata.py`)
+   - Added `list_watchlist_items(watchlist_id)` method
+   - Enhanced `list_alert_subscriptions()` with `rule_type` and `is_active` filters
+
+### PRD requirements met:
+- Initialize watchlist with addresses: 0x63ce342161250d705dc0b16df89036c8e5f9ba9a and 0x5388bc8cb72eb19a3bec0e8f3db6a77f7cd54d5a ✓
+- Track all trades for watchlisted wallets ✓
+  - Trade alert generator checks every trade against watched addresses
+- Generate in-app alerts when watchlisted wallets trade ✓
+  - AlertSchema stored with trade data and deduplication
+- Persist watchlist and alert subscriptions in ops metadata store ✓
+  - Uses watchlists, watchlist_items, alert_subscriptions, alerts tables
+
+### Test results:
+- Backend tests: 660 passing
+- Frontend build: passes
+- Frontend tests: 38 passing
+- mypy typecheck: no errors
+
+### Files modified:
+- `src/polymkt/api/main.py` - Added 14 Sharp Money API endpoints (~310 lines)
+- `src/polymkt/pipeline/update.py` - Added `_generate_trade_alerts()` function (~105 lines)
+- `src/polymkt/storage/metadata.py` - Added `list_watchlist_items()`, enhanced `list_alert_subscriptions()`
+
+### PRD feature marked as passing:
+- Sharp money v1 based on static watchlist
+
+### Notes for next person:
+- Call `POST /api/sharp-money/initialize` once to set up the default watchlist
+- Alerts are created automatically during the update pipeline when trades match
+- Alert deduplication uses transaction_hash stored in trade_data
+- The rule_type "watchlist_trade" is used for trade-triggered subscriptions
+- Wallet addresses are normalized to lowercase throughout the system
+
+### Next steps for future sessions:
+- Alerting system with latency SLA (10-30 second alerts in INGEST_MODE=live)
+- ClickHouse serving layer for rollups
+- INGEST_MODE and ANALYTICS_MODE runtime controls
+- Frontend UI for Sharp Money (watchlist management, alert viewing)

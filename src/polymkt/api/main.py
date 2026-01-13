@@ -66,6 +66,14 @@ from polymkt.models.schemas import (
     BacktestAgentResultSchema,
     ParsedStrategySchema,
     StrategyConfirmationSchema,
+    # Sharp Money schemas
+    WatchlistSchema,
+    WatchlistCreateRequest,
+    WatchlistAddWalletRequest,
+    AlertSubscriptionSchema,
+    AlertSubscriptionCreateRequest,
+    AlertSchema,
+    AlertListResponse,
 )
 from polymkt.pipeline.bootstrap import run_bootstrap
 from polymkt.pipeline.curate import run_curate
@@ -2990,3 +2998,316 @@ def backtest_agent_get_session(session_id: str) -> StrategyConfirmationSchema:
         summary=confirmation.summary,
         warnings=confirmation.warnings,
     )
+
+
+# =============================================================================
+# Sharp Money v1 endpoints for wallet watchlist and alert management
+# =============================================================================
+
+# Default Sharp Money wallet addresses
+SHARP_MONEY_DEFAULT_ADDRESSES = [
+    "0x63ce342161250d705dc0b16df89036c8e5f9ba9a",
+    "0x5388bc8cb72eb19a3bec0e8f3db6a77f7cd54d5a",
+]
+
+
+class SharpMoneyInitResponse(BaseModel):
+    """Response from Sharp Money initialization."""
+
+    watchlist: WatchlistSchema
+    subscription: AlertSubscriptionSchema
+    message: str
+
+
+class WatchlistListResponse(BaseModel):
+    """Response for listing watchlists."""
+
+    watchlists: list[WatchlistSchema]
+    count: int
+
+
+@app.post(
+    "/api/sharp-money/initialize",
+    response_model=SharpMoneyInitResponse,
+    tags=["Sharp Money"],
+)
+def sharp_money_initialize() -> SharpMoneyInitResponse:
+    """
+    Initialize the Sharp Money v1 watchlist with default wallet addresses.
+
+    Creates a watchlist named "Sharp Money v1" with the two default addresses
+    and creates an alert subscription to track all trades.
+
+    This is idempotent - if the watchlist already exists, returns the existing one.
+    """
+    metadata_store = MetadataStore(settings.metadata_db_path)
+
+    # Check if Sharp Money watchlist already exists
+    existing_watchlists = metadata_store.list_watchlists()
+    for wl in existing_watchlists:
+        if wl.name == "Sharp Money v1":
+            # Get or create subscription
+            subscriptions = metadata_store.list_alert_subscriptions(
+                watchlist_id=wl.id, is_active=None
+            )
+            if subscriptions:
+                return SharpMoneyInitResponse(
+                    watchlist=wl,
+                    subscription=subscriptions[0],
+                    message="Sharp Money v1 already initialized",
+                )
+            # Create subscription if missing
+            subscription = metadata_store.create_alert_subscription(
+                watchlist_id=wl.id,
+                rule_type="trade",
+                rule_config={"min_usd_amount": 0},
+                cooldown_seconds=0,
+            )
+            return SharpMoneyInitResponse(
+                watchlist=wl,
+                subscription=subscription,
+                message="Sharp Money v1 subscription created",
+            )
+
+    # Create new watchlist
+    watchlist = metadata_store.create_watchlist(
+        name="Sharp Money v1",
+        description="Track trades from known sharp money wallets",
+    )
+
+    # Add default addresses
+    for address in SHARP_MONEY_DEFAULT_ADDRESSES:
+        metadata_store.add_wallet_to_watchlist(watchlist.id, address)
+
+    # Refresh watchlist to get addresses
+    refreshed_watchlist = metadata_store.get_watchlist(watchlist.id)
+    if refreshed_watchlist is None:
+        raise HTTPException(status_code=500, detail="Failed to create watchlist")
+    watchlist = refreshed_watchlist
+
+    # Create alert subscription
+    subscription = metadata_store.create_alert_subscription(
+        watchlist_id=watchlist.id,
+        rule_type="trade",
+        rule_config={"min_usd_amount": 0},
+        cooldown_seconds=0,
+    )
+
+    return SharpMoneyInitResponse(
+        watchlist=watchlist,
+        subscription=subscription,
+        message="Sharp Money v1 initialized with default addresses",
+    )
+
+
+@app.get(
+    "/api/sharp-money/watchlists",
+    response_model=WatchlistListResponse,
+    tags=["Sharp Money"],
+)
+def list_watchlists() -> WatchlistListResponse:
+    """List all watchlists."""
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    watchlists = metadata_store.list_watchlists()
+    return WatchlistListResponse(watchlists=watchlists, count=len(watchlists))
+
+
+@app.post(
+    "/api/sharp-money/watchlists",
+    response_model=WatchlistSchema,
+    tags=["Sharp Money"],
+)
+def create_watchlist(request: WatchlistCreateRequest) -> WatchlistSchema:
+    """Create a new watchlist."""
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    watchlist = metadata_store.create_watchlist(
+        name=request.name, description=request.description
+    )
+
+    # Add initial wallet addresses if provided
+    for address in request.wallet_addresses:
+        metadata_store.add_wallet_to_watchlist(watchlist.id, address)
+
+    # Refresh to get addresses
+    result = metadata_store.get_watchlist(watchlist.id)
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to create watchlist")
+    return result
+
+
+@app.get(
+    "/api/sharp-money/watchlists/{watchlist_id}",
+    response_model=WatchlistSchema,
+    tags=["Sharp Money"],
+)
+def get_watchlist(watchlist_id: str) -> WatchlistSchema:
+    """Get a watchlist by ID."""
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    watchlist = metadata_store.get_watchlist(watchlist_id)
+    if watchlist is None:
+        raise HTTPException(status_code=404, detail=f"Watchlist not found: {watchlist_id}")
+    return watchlist
+
+
+@app.delete(
+    "/api/sharp-money/watchlists/{watchlist_id}",
+    tags=["Sharp Money"],
+)
+def delete_watchlist(watchlist_id: str) -> dict[str, str]:
+    """Delete a watchlist."""
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    deleted = metadata_store.delete_watchlist(watchlist_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"Watchlist not found: {watchlist_id}")
+    return {"message": f"Watchlist {watchlist_id} deleted"}
+
+
+@app.post(
+    "/api/sharp-money/watchlists/{watchlist_id}/wallets",
+    response_model=WatchlistSchema,
+    tags=["Sharp Money"],
+)
+def add_wallet_to_watchlist(
+    watchlist_id: str, request: WatchlistAddWalletRequest
+) -> WatchlistSchema:
+    """Add a wallet address to a watchlist."""
+    metadata_store = MetadataStore(settings.metadata_db_path)
+
+    # Check watchlist exists
+    watchlist = metadata_store.get_watchlist(watchlist_id)
+    if watchlist is None:
+        raise HTTPException(status_code=404, detail=f"Watchlist not found: {watchlist_id}")
+
+    # Add wallet
+    metadata_store.add_wallet_to_watchlist(
+        watchlist_id, request.wallet_address, request.notes
+    )
+
+    # Return updated watchlist
+    result = metadata_store.get_watchlist(watchlist_id)
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to update watchlist")
+    return result
+
+
+@app.delete(
+    "/api/sharp-money/watchlists/{watchlist_id}/wallets/{wallet_address}",
+    response_model=WatchlistSchema,
+    tags=["Sharp Money"],
+)
+def remove_wallet_from_watchlist(
+    watchlist_id: str, wallet_address: str
+) -> WatchlistSchema:
+    """Remove a wallet address from a watchlist."""
+    metadata_store = MetadataStore(settings.metadata_db_path)
+
+    # Check watchlist exists
+    watchlist = metadata_store.get_watchlist(watchlist_id)
+    if watchlist is None:
+        raise HTTPException(status_code=404, detail=f"Watchlist not found: {watchlist_id}")
+
+    # Remove wallet
+    removed = metadata_store.remove_wallet_from_watchlist(watchlist_id, wallet_address)
+    if not removed:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Wallet {wallet_address} not found in watchlist",
+        )
+
+    # Return updated watchlist
+    result = metadata_store.get_watchlist(watchlist_id)
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to update watchlist")
+    return result
+
+
+@app.post(
+    "/api/sharp-money/subscriptions",
+    response_model=AlertSubscriptionSchema,
+    tags=["Sharp Money"],
+)
+def create_alert_subscription(
+    request: AlertSubscriptionCreateRequest,
+) -> AlertSubscriptionSchema:
+    """Create an alert subscription for a watchlist."""
+    metadata_store = MetadataStore(settings.metadata_db_path)
+
+    # Check watchlist exists
+    watchlist = metadata_store.get_watchlist(request.watchlist_id)
+    if watchlist is None:
+        raise HTTPException(
+            status_code=404, detail=f"Watchlist not found: {request.watchlist_id}"
+        )
+
+    subscription = metadata_store.create_alert_subscription(
+        watchlist_id=request.watchlist_id,
+        rule_type=request.rule_type,
+        rule_config=request.rule_config,
+        cooldown_seconds=request.cooldown_seconds,
+    )
+    return subscription
+
+
+@app.get(
+    "/api/sharp-money/subscriptions",
+    response_model=list[AlertSubscriptionSchema],
+    tags=["Sharp Money"],
+)
+def list_alert_subscriptions(
+    watchlist_id: str | None = None, is_active: bool | None = True
+) -> list[AlertSubscriptionSchema]:
+    """List alert subscriptions, optionally filtered by watchlist."""
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    return metadata_store.list_alert_subscriptions(
+        watchlist_id=watchlist_id, is_active=is_active
+    )
+
+
+@app.patch(
+    "/api/sharp-money/subscriptions/{subscription_id}/active",
+    tags=["Sharp Money"],
+)
+def set_subscription_active(subscription_id: str, is_active: bool) -> dict[str, Any]:
+    """Enable or disable an alert subscription."""
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    updated = metadata_store.set_alert_subscription_active(subscription_id, is_active)
+    if not updated:
+        raise HTTPException(
+            status_code=404, detail=f"Subscription not found: {subscription_id}"
+        )
+    return {"subscription_id": subscription_id, "is_active": is_active}
+
+
+@app.get(
+    "/api/sharp-money/alerts",
+    response_model=AlertListResponse,
+    tags=["Sharp Money"],
+)
+def list_alerts(
+    subscription_id: str | None = None,
+    unacknowledged_only: bool = False,
+    limit: int = 100,
+) -> AlertListResponse:
+    """List alerts, optionally filtered by subscription or acknowledgment status."""
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    alerts = metadata_store.list_alerts(
+        subscription_id=subscription_id,
+        unacknowledged_only=unacknowledged_only,
+        limit=limit,
+    )
+    return AlertListResponse(
+        alerts=alerts, count=len(alerts), has_more=len(alerts) == limit
+    )
+
+
+@app.post(
+    "/api/sharp-money/alerts/{alert_id}/acknowledge",
+    tags=["Sharp Money"],
+)
+def acknowledge_alert(alert_id: str) -> dict[str, str]:
+    """Acknowledge an alert."""
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    acknowledged = metadata_store.acknowledge_alert(alert_id)
+    if not acknowledged:
+        raise HTTPException(status_code=404, detail=f"Alert not found: {alert_id}")
+    return {"alert_id": alert_id, "status": "acknowledged"}

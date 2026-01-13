@@ -112,7 +112,7 @@
             "Generate in-app alerts when watchlisted wallets trade",
             "Persist watchlist and alert subscriptions in ops metadata store"
         ],
-        "passes": false
+        "passes": true
     },
     {
         "category": "functional",
