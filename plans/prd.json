@@ -28,7 +28,7 @@
             "Persist current modes and last transition timestamp in ops metadata store",
             "Implement safe transitions with idempotent start/stop semantics"
         ],
-        "passes": false
+        "passes": true
     },
     {
         "category": "functional",

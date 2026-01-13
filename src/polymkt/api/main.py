@@ -1,5 +1,6 @@
 """FastAPI application for the Polymkt analytics platform."""
 
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
@@ -74,6 +75,13 @@ from polymkt.models.schemas import (
     AlertSubscriptionCreateRequest,
     AlertSchema,
     AlertListResponse,
+    # Runtime mode schemas
+    IngestMode,
+    AnalyticsMode,
+    ModeStateSchema,
+    ModeTransitionRequest,
+    ModeTransitionResponse,
+    RuntimeStatusSchema,
 )
 from polymkt.pipeline.bootstrap import run_bootstrap
 from polymkt.pipeline.curate import run_curate
@@ -3311,3 +3319,152 @@ def acknowledge_alert(alert_id: str) -> dict[str, str]:
     if not acknowledged:
         raise HTTPException(status_code=404, detail=f"Alert not found: {alert_id}")
     return {"alert_id": alert_id, "status": "acknowledged"}
+
+
+# =============================================================================
+# Runtime Mode Management Endpoints
+# =============================================================================
+
+
+@app.get(
+    "/api/runtime/status",
+    response_model=RuntimeStatusSchema,
+    tags=["Runtime"],
+)
+def get_runtime_status() -> RuntimeStatusSchema:
+    """Get the current runtime status including all modes."""
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    modes = metadata_store.get_all_mode_states()
+
+    ingest_state = modes.get("ingest_mode")
+    analytics_state = modes.get("analytics_mode")
+
+    if not ingest_state or not analytics_state:
+        raise HTTPException(
+            status_code=500, detail="Runtime modes not initialized"
+        )
+
+    return RuntimeStatusSchema(
+        ingest_mode=ingest_state,
+        analytics_mode=analytics_state,
+    )
+
+
+@app.get(
+    "/api/runtime/ingest-mode",
+    response_model=ModeStateSchema,
+    tags=["Runtime"],
+)
+def get_ingest_mode() -> ModeStateSchema:
+    """Get the current ingestion mode state."""
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    state = metadata_store.get_mode_state("ingest_mode")
+    if not state:
+        raise HTTPException(status_code=500, detail="Ingest mode not initialized")
+    return state
+
+
+@app.post(
+    "/api/runtime/ingest-mode",
+    response_model=ModeTransitionResponse,
+    tags=["Runtime"],
+)
+def set_ingest_mode_endpoint(request: ModeTransitionRequest) -> ModeTransitionResponse:
+    """
+    Set the ingestion mode with safe transition semantics.
+
+    Valid values: off, batched, live
+    """
+    metadata_store = MetadataStore(settings.metadata_db_path)
+
+    # Validate the target value
+    try:
+        target_mode = IngestMode(request.target_value)
+    except ValueError:
+        valid_values = [m.value for m in IngestMode]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid ingest mode: {request.target_value}. Valid values: {valid_values}",
+        )
+
+    # Get current state before transition
+    current_state = metadata_store.get_mode_state("ingest_mode")
+    previous_value = current_state.mode_value if current_state else "off"
+
+    # Perform transition
+    success, message = metadata_store.set_ingest_mode(
+        target_mode, initiated_by=request.initiated_by, force=request.force
+    )
+
+    if not success:
+        raise HTTPException(status_code=409, detail=message)
+
+    return ModeTransitionResponse(
+        success=True,
+        mode_name="ingest_mode",
+        previous_value=previous_value,
+        new_value=target_mode.value,
+        transitioned_at=datetime.now(timezone.utc),
+        message=message,
+    )
+
+
+@app.get(
+    "/api/runtime/analytics-mode",
+    response_model=ModeStateSchema,
+    tags=["Runtime"],
+)
+def get_analytics_mode() -> ModeStateSchema:
+    """Get the current analytics mode state."""
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    state = metadata_store.get_mode_state("analytics_mode")
+    if not state:
+        raise HTTPException(status_code=500, detail="Analytics mode not initialized")
+    return state
+
+
+@app.post(
+    "/api/runtime/analytics-mode",
+    response_model=ModeTransitionResponse,
+    tags=["Runtime"],
+)
+def set_analytics_mode_endpoint(
+    request: ModeTransitionRequest,
+) -> ModeTransitionResponse:
+    """
+    Set the analytics mode with safe transition semantics.
+
+    Valid values: off, on_demand, live
+    """
+    metadata_store = MetadataStore(settings.metadata_db_path)
+
+    # Validate the target value
+    try:
+        target_mode = AnalyticsMode(request.target_value)
+    except ValueError:
+        valid_values = [m.value for m in AnalyticsMode]
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid analytics mode: {request.target_value}. Valid values: {valid_values}",
+        )
+
+    # Get current state before transition
+    current_state = metadata_store.get_mode_state("analytics_mode")
+    previous_value = current_state.mode_value if current_state else "off"
+
+    # Perform transition
+    success, message = metadata_store.set_analytics_mode(
+        target_mode, initiated_by=request.initiated_by, force=request.force
+    )
+
+    if not success:
+        raise HTTPException(status_code=409, detail=message)
+
+    return ModeTransitionResponse(
+        success=True,
+        mode_name="analytics_mode",
+        previous_value=previous_value,
+        new_value=target_mode.value,
+        transitioned_at=datetime.now(timezone.utc),
+        message=message,
+    )

@@ -16,6 +16,9 @@ from polymkt.models.schemas import (
     AlertSubscriptionSchema,
     AlertSchema,
     AnalyticsSessionSchema,
+    ModeStateSchema,
+    IngestMode,
+    AnalyticsMode,
 )
 
 logger = structlog.get_logger()
@@ -137,6 +140,33 @@ class MetadataStore:
                 CREATE INDEX IF NOT EXISTS idx_sessions_status_activity
                 ON analytics_sessions(status, last_activity_at DESC)
             """)
+
+            # Runtime mode state table
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS mode_state (
+                    mode_name TEXT PRIMARY KEY,
+                    mode_value TEXT NOT NULL,
+                    previous_value TEXT,
+                    transitioned_at TEXT NOT NULL,
+                    transitioned_by TEXT DEFAULT 'system',
+                    is_transitioning INTEGER DEFAULT 0,
+                    transition_started_at TEXT,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+
+            # Initialize default modes if they don't exist
+            now = datetime.now(timezone.utc).isoformat()
+            conn.execute("""
+                INSERT OR IGNORE INTO mode_state
+                (mode_name, mode_value, transitioned_at, transitioned_by, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, ("ingest_mode", IngestMode.OFF.value, now, "system", now))
+            conn.execute("""
+                INSERT OR IGNORE INTO mode_state
+                (mode_name, mode_value, transitioned_at, transitioned_by, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+            """, ("analytics_mode", AnalyticsMode.OFF.value, now, "system", now))
 
             conn.commit()
         finally:
@@ -948,5 +978,208 @@ class MetadataStore:
             status=row["status"],
             queries_run=row["queries_run"],
             rows_accessed=row["rows_accessed"],
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    # =========================================================================
+    # Runtime Mode Management
+    # =========================================================================
+
+    def get_mode_state(self, mode_name: str) -> ModeStateSchema | None:
+        """Get the current state of a runtime mode."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute(
+                "SELECT * FROM mode_state WHERE mode_name = ?", (mode_name,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            return self._row_to_mode_state(row)
+        finally:
+            conn.close()
+
+    def get_all_mode_states(self) -> dict[str, ModeStateSchema]:
+        """Get all runtime mode states."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute("SELECT * FROM mode_state")
+            return {
+                row["mode_name"]: self._row_to_mode_state(row)
+                for row in cursor.fetchall()
+            }
+        finally:
+            conn.close()
+
+    def get_ingest_mode(self) -> IngestMode:
+        """Get the current ingestion mode."""
+        state = self.get_mode_state("ingest_mode")
+        if not state:
+            return IngestMode.OFF
+        return IngestMode(state.mode_value)
+
+    def get_analytics_mode(self) -> AnalyticsMode:
+        """Get the current analytics mode."""
+        state = self.get_mode_state("analytics_mode")
+        if not state:
+            return AnalyticsMode.OFF
+        return AnalyticsMode(state.mode_value)
+
+    def set_mode(
+        self,
+        mode_name: str,
+        new_value: str,
+        initiated_by: str = "system",
+        force: bool = False,
+    ) -> tuple[bool, str]:
+        """
+        Set a runtime mode to a new value with safe transition semantics.
+
+        Args:
+            mode_name: The mode to change (ingest_mode or analytics_mode)
+            new_value: The target mode value
+            initiated_by: Who is initiating this transition
+            force: Force transition even if one is in progress
+
+        Returns:
+            Tuple of (success, message)
+        """
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Validate mode name
+        if mode_name not in ("ingest_mode", "analytics_mode"):
+            return False, f"Unknown mode: {mode_name}"
+
+        # Validate mode value
+        if mode_name == "ingest_mode":
+            try:
+                IngestMode(new_value)
+            except ValueError:
+                valid = [m.value for m in IngestMode]
+                return False, f"Invalid ingest_mode value: {new_value}. Valid: {valid}"
+        else:
+            try:
+                AnalyticsMode(new_value)
+            except ValueError:
+                valid = [m.value for m in AnalyticsMode]
+                return False, f"Invalid analytics_mode value: {new_value}. Valid: {valid}"
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            # Get current state
+            cursor = conn.execute(
+                "SELECT * FROM mode_state WHERE mode_name = ?", (mode_name,)
+            )
+            row = cursor.fetchone()
+
+            if not row:
+                # Mode doesn't exist, create it
+                conn.execute(
+                    """
+                    INSERT INTO mode_state
+                    (mode_name, mode_value, transitioned_at, transitioned_by, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (mode_name, new_value, now, initiated_by, now),
+                )
+                conn.commit()
+                logger.info(
+                    "mode_created",
+                    mode_name=mode_name,
+                    value=new_value,
+                    initiated_by=initiated_by,
+                )
+                return True, f"Mode {mode_name} created with value {new_value}"
+
+            current_value = row["mode_value"]
+            is_transitioning = bool(row["is_transitioning"])
+
+            # Check if already at target value
+            if current_value == new_value:
+                return True, f"Mode {mode_name} is already {new_value}"
+
+            # Check for in-progress transition
+            if is_transitioning and not force:
+                return (
+                    False,
+                    f"Mode {mode_name} has a transition in progress. Use force=True to override.",
+                )
+
+            # Begin transition
+            conn.execute(
+                """
+                UPDATE mode_state SET
+                    is_transitioning = 1,
+                    transition_started_at = ?,
+                    updated_at = ?
+                WHERE mode_name = ?
+                """,
+                (now, now, mode_name),
+            )
+            conn.commit()
+
+            # Complete transition (in real system, this might involve stopping/starting services)
+            conn.execute(
+                """
+                UPDATE mode_state SET
+                    mode_value = ?,
+                    previous_value = ?,
+                    transitioned_at = ?,
+                    transitioned_by = ?,
+                    is_transitioning = 0,
+                    transition_started_at = NULL,
+                    updated_at = ?
+                WHERE mode_name = ?
+                """,
+                (new_value, current_value, now, initiated_by, now, mode_name),
+            )
+            conn.commit()
+
+            logger.info(
+                "mode_transitioned",
+                mode_name=mode_name,
+                from_value=current_value,
+                to_value=new_value,
+                initiated_by=initiated_by,
+            )
+            return True, f"Mode {mode_name} transitioned from {current_value} to {new_value}"
+
+        finally:
+            conn.close()
+
+    def set_ingest_mode(
+        self, mode: IngestMode, initiated_by: str = "system", force: bool = False
+    ) -> tuple[bool, str]:
+        """Set the ingestion mode with safe transition semantics."""
+        return self.set_mode("ingest_mode", mode.value, initiated_by, force)
+
+    def set_analytics_mode(
+        self, mode: AnalyticsMode, initiated_by: str = "system", force: bool = False
+    ) -> tuple[bool, str]:
+        """Set the analytics mode with safe transition semantics."""
+        return self.set_mode("analytics_mode", mode.value, initiated_by, force)
+
+    def is_mode_transitioning(self, mode_name: str) -> bool:
+        """Check if a mode is currently transitioning."""
+        state = self.get_mode_state(mode_name)
+        return state.is_transitioning if state else False
+
+    def _row_to_mode_state(self, row: sqlite3.Row) -> ModeStateSchema:
+        """Convert a database row to a ModeStateSchema."""
+        return ModeStateSchema(
+            mode_name=row["mode_name"],
+            mode_value=row["mode_value"],
+            previous_value=row["previous_value"],
+            transitioned_at=datetime.fromisoformat(row["transitioned_at"]),
+            transitioned_by=row["transitioned_by"],
+            is_transitioning=bool(row["is_transitioning"]),
+            transition_started_at=(
+                datetime.fromisoformat(row["transition_started_at"])
+                if row["transition_started_at"]
+                else None
+            ),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )

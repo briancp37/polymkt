@@ -1,6 +1,7 @@
 """Data schemas for markets, trades, and orders."""
 
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -1142,3 +1143,69 @@ class AnalyticsSessionCreateRequest(BaseModel):
     idle_timeout_minutes: int = Field(
         120, ge=1, le=1440, description="Idle timeout in minutes (max 24 hours)"
     )
+
+
+# =============================================================================
+# Runtime Mode Schemas
+# =============================================================================
+
+
+class IngestMode(str, Enum):
+    """Ingestion mode controlling data pipeline behavior."""
+
+    OFF = "off"  # Disables all ingestion except manual backfill
+    BATCHED = "batched"  # Runs update_to_now() on 5-minute cadence
+    LIVE = "live"  # Long-lived ingest/consumer loop
+
+
+class AnalyticsMode(str, Enum):
+    """Analytics mode controlling query infrastructure behavior."""
+
+    OFF = "off"  # Analytics infrastructure disabled
+    ON_DEMAND = "on_demand"  # Start when needed, stop after TTL
+    LIVE = "live"  # Always available
+
+
+class ModeStateSchema(BaseModel):
+    """Current runtime mode state."""
+
+    mode_name: str = Field(..., description="Mode identifier (ingest_mode or analytics_mode)")
+    mode_value: str = Field(..., description="Current mode value")
+    previous_value: str | None = Field(None, description="Previous mode value")
+    transitioned_at: datetime = Field(..., description="When the mode was last changed")
+    transitioned_by: str = Field("system", description="Who initiated the transition")
+    is_transitioning: bool = Field(
+        False, description="Whether a transition is in progress"
+    )
+    transition_started_at: datetime | None = Field(
+        None, description="When the current transition started"
+    )
+    updated_at: datetime = Field(..., description="Last update timestamp")
+
+
+class ModeTransitionRequest(BaseModel):
+    """Request to transition a mode to a new value."""
+
+    target_value: str = Field(..., description="Target mode value")
+    initiated_by: str = Field("api", description="Who is initiating the transition")
+    force: bool = Field(
+        False, description="Force transition even if one is in progress"
+    )
+
+
+class ModeTransitionResponse(BaseModel):
+    """Response from a mode transition request."""
+
+    success: bool = Field(..., description="Whether transition was successful")
+    mode_name: str = Field(..., description="Mode that was transitioned")
+    previous_value: str = Field(..., description="Previous mode value")
+    new_value: str = Field(..., description="New mode value")
+    transitioned_at: datetime = Field(..., description="Transition timestamp")
+    message: str = Field(..., description="Transition result message")
+
+
+class RuntimeStatusSchema(BaseModel):
+    """Current runtime status including all modes."""
+
+    ingest_mode: ModeStateSchema = Field(..., description="Ingestion mode state")
+    analytics_mode: ModeStateSchema = Field(..., description="Analytics mode state")

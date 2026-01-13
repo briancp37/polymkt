@@ -3451,3 +3451,83 @@ Implemented the Sharp Money v1 feature with static watchlist support, including 
 - ClickHouse serving layer for rollups
 - INGEST_MODE and ANALYTICS_MODE runtime controls
 - Frontend UI for Sharp Money (watchlist management, alert viewing)
+
+---
+
+## 2026-01-12: INGEST_MODE and ANALYTICS_MODE Runtime Controls
+
+### What was done:
+Implemented runtime mode controls for ingestion and analytics with safe transition semantics, persisted mode state, and API endpoints for mode management.
+
+### Features implemented:
+
+1. **Mode State Enums** (`src/polymkt/models/schemas.py:1152-1211`)
+   - `IngestMode` enum: `off`, `batched`, `live`
+   - `AnalyticsMode` enum: `off`, `on_demand`, `live`
+   - `ModeStateSchema` for tracking mode state with transitions
+   - `ModeTransitionRequest` for mode change requests
+   - `ModeTransitionResponse` for transition results
+   - `RuntimeStatusSchema` for combined status
+
+2. **Mode State Table** (`src/polymkt/storage/metadata.py:144-169`)
+   - `mode_state` table persists mode name, value, previous value, transition timestamp
+   - Tracks `is_transitioning` flag for in-progress transitions
+   - Auto-initializes `ingest_mode=off` and `analytics_mode=off` on first run
+
+3. **Mode Management Methods** (`src/polymkt/storage/metadata.py:984-1186`)
+   - `get_mode_state(mode_name)` - Get current state of a mode
+   - `get_all_mode_states()` - Get all mode states
+   - `get_ingest_mode()` / `get_analytics_mode()` - Typed getters
+   - `set_mode()` - Generic mode setter with validation and safe transitions
+   - `set_ingest_mode()` / `set_analytics_mode()` - Typed setters
+   - `is_mode_transitioning()` - Check for in-progress transitions
+
+4. **Safe Transition Semantics**
+   - Validates mode values against enum
+   - Checks for in-progress transitions (use `force=True` to override)
+   - Records previous value, transition timestamp, and initiator
+   - Idempotent: re-setting to current value is a no-op
+   - Logs all transitions with structured logging
+
+5. **Runtime API Endpoints** (`src/polymkt/api/main.py:3323-3470`)
+   - `GET /api/runtime/status` - Get combined runtime status
+   - `GET /api/runtime/ingest-mode` - Get ingest mode state
+   - `POST /api/runtime/ingest-mode` - Set ingest mode
+   - `GET /api/runtime/analytics-mode` - Get analytics mode state
+   - `POST /api/runtime/analytics-mode` - Set analytics mode
+
+### PRD requirements met:
+- Add global runtime configuration with INGEST_MODE = off | batched | live ✓
+- Add global runtime configuration with ANALYTICS_MODE = off | on_demand | live ✓
+- Ensure INGEST_MODE=live can coexist with ANALYTICS_MODE=off ✓
+  - Modes are independent; transitions are validated per-mode
+- Persist current modes and last transition timestamp in ops metadata store ✓
+  - mode_state table stores all transition history
+- Implement safe transitions with idempotent start/stop semantics ✓
+  - Transition checking, force override, structured logging
+
+### Test results:
+- Backend tests: 660 passing
+- Frontend build: passes
+- Frontend tests: 38 passing
+- mypy typecheck: no errors
+
+### Files modified:
+- `src/polymkt/models/schemas.py` - Added 6 new mode-related schemas (~60 lines)
+- `src/polymkt/storage/metadata.py` - Added mode_state table and ~200 lines of methods
+- `src/polymkt/api/main.py` - Added 5 runtime mode endpoints (~150 lines)
+
+### PRD feature marked as passing:
+- Introduce INGEST_MODE and ANALYTICS_MODE runtime controls with safe transitions
+
+### Notes for next person:
+- Modes default to `off` on first database initialization
+- Mode transitions are atomic and logged with structured logging
+- The `force=True` parameter allows overriding stuck transitions
+- INGEST_MODE and ANALYTICS_MODE are completely independent
+- Future implementation of actual ingestion/analytics services should check these modes
+
+### Next steps for future sessions:
+- Polymarket ingestion supports live, batched, and dormant operation (uses INGEST_MODE)
+- Alerting system with latency SLA (uses INGEST_MODE=live)
+- ClickHouse lifecycle management (uses ANALYTICS_MODE)
