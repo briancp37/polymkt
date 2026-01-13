@@ -23,6 +23,7 @@ from polymkt.models.schemas import (
     MTMSnapshotSchema,
     ClosedPositionSchema,
     WalletMetricsSchema,
+    WalletMetricsRollupSchema,
 )
 
 logger = structlog.get_logger()
@@ -260,6 +261,32 @@ class MetadataStore:
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_position_trades_position
                 ON position_trades(position_id, timestamp DESC)
+            """)
+
+            # Wallet metrics rollups for 1m, 1h, 1d aggregations
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS wallet_metrics_rollups (
+                    id TEXT PRIMARY KEY,
+                    wallet_address TEXT NOT NULL,
+                    interval TEXT NOT NULL,
+                    window_start TEXT NOT NULL,
+                    window_end TEXT NOT NULL,
+                    trade_count INTEGER DEFAULT 0,
+                    buy_count INTEGER DEFAULT 0,
+                    sell_count INTEGER DEFAULT 0,
+                    volume_usd REAL DEFAULT 0.0,
+                    positions_opened INTEGER DEFAULT 0,
+                    positions_closed INTEGER DEFAULT 0,
+                    realized_pnl REAL DEFAULT 0.0,
+                    win_count INTEGER DEFAULT 0,
+                    loss_count INTEGER DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    UNIQUE (wallet_address, interval, window_start)
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_rollups_wallet_interval
+                ON wallet_metrics_rollups(wallet_address, interval, window_start DESC)
             """)
 
             conn.commit()
@@ -1856,4 +1883,277 @@ class MetadataStore:
             mtm_pnl=row["mtm_pnl"],
             average_cost=row["average_cost"],
             created_at=datetime.fromisoformat(row["created_at"]),
+        )
+
+    # =========================================================================
+    # Wallet metrics rollup methods (1m, 1h, 1d aggregations)
+    # =========================================================================
+
+    def compute_wallet_rollup(
+        self,
+        wallet_address: str,
+        interval: str,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> WalletMetricsRollupSchema:
+        """
+        Compute a metrics rollup for a wallet over a time window.
+
+        Aggregates:
+        - Trade counts and volume from position_trades
+        - Positions opened (first trades for new positions)
+        - Positions closed with realized P&L from closed_positions
+        - Win/loss counts from closed positions
+
+        Args:
+            wallet_address: Wallet address
+            interval: Rollup interval (1m, 1h, 1d)
+            window_start: Start of window
+            window_end: End of window
+
+        Returns:
+            WalletMetricsRollupSchema with aggregated metrics
+        """
+        wallet = wallet_address.lower()
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            # Get trade stats from position_trades
+            cursor = conn.execute(
+                """
+                SELECT
+                    COUNT(*) as trade_count,
+                    SUM(CASE WHEN is_buy = 1 THEN 1 ELSE 0 END) as buy_count,
+                    SUM(CASE WHEN is_buy = 0 THEN 1 ELSE 0 END) as sell_count,
+                    SUM(usd_amount) as volume_usd
+                FROM position_trades
+                WHERE wallet_address = ?
+                AND timestamp >= ?
+                AND timestamp < ?
+                """,
+                (wallet, window_start.isoformat(), window_end.isoformat()),
+            )
+            trade_row = cursor.fetchone()
+
+            trade_count = trade_row["trade_count"] or 0
+            buy_count = trade_row["buy_count"] or 0
+            sell_count = trade_row["sell_count"] or 0
+            volume_usd = trade_row["volume_usd"] or 0.0
+
+            # Get closed position stats
+            cursor = conn.execute(
+                """
+                SELECT
+                    COUNT(*) as positions_closed,
+                    SUM(realized_pnl) as realized_pnl,
+                    SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) as win_count,
+                    SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END) as loss_count
+                FROM closed_positions
+                WHERE wallet_address = ?
+                AND closed_at >= ?
+                AND closed_at < ?
+                """,
+                (wallet, window_start.isoformat(), window_end.isoformat()),
+            )
+            closed_row = cursor.fetchone()
+
+            positions_closed = closed_row["positions_closed"] or 0
+            realized_pnl = closed_row["realized_pnl"] or 0.0
+            win_count = closed_row["win_count"] or 0
+            loss_count = closed_row["loss_count"] or 0
+
+            # Count positions opened (first trade for each position in window)
+            cursor = conn.execute(
+                """
+                SELECT COUNT(DISTINCT position_id) as positions_opened
+                FROM position_trades pt
+                WHERE wallet_address = ?
+                AND timestamp >= ?
+                AND timestamp < ?
+                AND NOT EXISTS (
+                    SELECT 1 FROM position_trades pt2
+                    WHERE pt2.position_id = pt.position_id
+                    AND pt2.timestamp < ?
+                )
+                """,
+                (
+                    wallet,
+                    window_start.isoformat(),
+                    window_end.isoformat(),
+                    window_start.isoformat(),
+                ),
+            )
+            opened_row = cursor.fetchone()
+            positions_opened = opened_row["positions_opened"] or 0
+
+            return WalletMetricsRollupSchema(
+                wallet_address=wallet,
+                interval=interval,
+                window_start=window_start,
+                window_end=window_end,
+                trade_count=trade_count,
+                buy_count=buy_count,
+                sell_count=sell_count,
+                volume_usd=volume_usd,
+                positions_opened=positions_opened,
+                positions_closed=positions_closed,
+                realized_pnl=realized_pnl,
+                win_count=win_count,
+                loss_count=loss_count,
+            )
+        finally:
+            conn.close()
+
+    def save_wallet_rollup(self, rollup: WalletMetricsRollupSchema) -> None:
+        """Save a computed rollup to the database."""
+        rollup_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO wallet_metrics_rollups (
+                    id, wallet_address, interval, window_start, window_end,
+                    trade_count, buy_count, sell_count, volume_usd,
+                    positions_opened, positions_closed, realized_pnl,
+                    win_count, loss_count, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(wallet_address, interval, window_start) DO UPDATE SET
+                    trade_count = excluded.trade_count,
+                    buy_count = excluded.buy_count,
+                    sell_count = excluded.sell_count,
+                    volume_usd = excluded.volume_usd,
+                    positions_opened = excluded.positions_opened,
+                    positions_closed = excluded.positions_closed,
+                    realized_pnl = excluded.realized_pnl,
+                    win_count = excluded.win_count,
+                    loss_count = excluded.loss_count,
+                    created_at = excluded.created_at
+                """,
+                (
+                    rollup_id,
+                    rollup.wallet_address,
+                    rollup.interval,
+                    rollup.window_start.isoformat(),
+                    rollup.window_end.isoformat(),
+                    rollup.trade_count,
+                    rollup.buy_count,
+                    rollup.sell_count,
+                    rollup.volume_usd,
+                    rollup.positions_opened,
+                    rollup.positions_closed,
+                    rollup.realized_pnl,
+                    rollup.win_count,
+                    rollup.loss_count,
+                    now.isoformat(),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_wallet_rollups(
+        self,
+        wallet_address: str,
+        interval: str,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        limit: int = 100,
+    ) -> list[WalletMetricsRollupSchema]:
+        """
+        Get stored rollups for a wallet.
+
+        Args:
+            wallet_address: Wallet address
+            interval: Rollup interval (1m, 1h, 1d)
+            start_time: Optional start of time range
+            end_time: Optional end of time range
+            limit: Maximum number of rollups to return
+
+        Returns:
+            List of rollups sorted by window_start descending
+        """
+        wallet = wallet_address.lower()
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            query = """
+                SELECT * FROM wallet_metrics_rollups
+                WHERE wallet_address = ? AND interval = ?
+            """
+            params: list[Any] = [wallet, interval]
+
+            if start_time:
+                query += " AND window_start >= ?"
+                params.append(start_time.isoformat())
+            if end_time:
+                query += " AND window_start < ?"
+                params.append(end_time.isoformat())
+
+            query += " ORDER BY window_start DESC LIMIT ?"
+            params.append(limit)
+
+            cursor = conn.execute(query, params)
+            return [self._row_to_rollup(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def compute_wallet_rollups_for_range(
+        self,
+        wallet_address: str,
+        interval: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> list[WalletMetricsRollupSchema]:
+        """
+        Compute and save rollups for a wallet over a time range.
+
+        Args:
+            wallet_address: Wallet address
+            interval: Rollup interval (1m, 1h, 1d)
+            start_time: Start of range
+            end_time: End of range
+
+        Returns:
+            List of computed rollups
+        """
+        from polymkt.services.positions import get_rollup_window_boundaries
+
+        rollups = []
+        current_start = start_time
+
+        while current_start < end_time:
+            window_start, window_end = get_rollup_window_boundaries(
+                current_start, interval
+            )
+
+            if window_end > end_time:
+                break
+
+            rollup = self.compute_wallet_rollup(
+                wallet_address, interval, window_start, window_end
+            )
+            self.save_wallet_rollup(rollup)
+            rollups.append(rollup)
+
+            current_start = window_end
+
+        return rollups
+
+    def _row_to_rollup(self, row: sqlite3.Row) -> WalletMetricsRollupSchema:
+        """Convert a database row to a WalletMetricsRollupSchema."""
+        return WalletMetricsRollupSchema(
+            wallet_address=row["wallet_address"],
+            interval=row["interval"],
+            window_start=datetime.fromisoformat(row["window_start"]),
+            window_end=datetime.fromisoformat(row["window_end"]),
+            trade_count=row["trade_count"],
+            buy_count=row["buy_count"],
+            sell_count=row["sell_count"],
+            volume_usd=row["volume_usd"],
+            positions_opened=row["positions_opened"],
+            positions_closed=row["positions_closed"],
+            realized_pnl=row["realized_pnl"],
+            win_count=row["win_count"],
+            loss_count=row["loss_count"],
         )

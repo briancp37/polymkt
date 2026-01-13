@@ -9,6 +9,7 @@ from polymkt.services.positions import (
     PositionTracker,
     MTMProcessor,
     get_5min_window_boundaries,
+    get_rollup_window_boundaries,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "PositionTracker",
     "MTMProcessor",
     "get_5min_window_boundaries",
+    "get_rollup_window_boundaries",
 ]

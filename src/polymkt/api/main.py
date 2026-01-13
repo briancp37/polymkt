@@ -88,6 +88,8 @@ from polymkt.models.schemas import (
     ClosedPositionSchema,
     WalletMetricsSchema,
     MTMProcessingResult,
+    WalletMetricsRollupSchema,
+    WalletMetricsRollupListResponse,
 )
 from polymkt.pipeline.bootstrap import run_bootstrap
 from polymkt.pipeline.curate import run_curate
@@ -3682,3 +3684,201 @@ def process_mtm_window() -> MTMProcessingResult:
     window_start, window_end = get_5min_window_boundaries(now)
 
     return processor.process_window(window_start, window_end)
+
+
+# =============================================================================
+# Win Percentage and Volume Metrics Rollup Endpoints
+# =============================================================================
+
+
+@app.get(
+    "/api/wallets/{wallet_address}/rollups/{interval}",
+    response_model=WalletMetricsRollupListResponse,
+    tags=["Metrics"],
+)
+def get_wallet_rollups(
+    wallet_address: str,
+    interval: str,
+    limit: int = 100,
+) -> WalletMetricsRollupListResponse:
+    """
+    Get wallet metrics rollups at the specified interval.
+
+    Intervals:
+    - 1m: 1-minute rollups
+    - 1h: 1-hour rollups
+    - 1d: 1-day rollups
+
+    Returns trade counts, volume, win/loss stats per window.
+    """
+    if interval not in ("1m", "1h", "1d"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid interval: {interval}. Must be 1m, 1h, or 1d",
+        )
+
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    rollups = metadata_store.get_wallet_rollups(wallet_address, interval, limit=limit)
+
+    return WalletMetricsRollupListResponse(
+        rollups=rollups,
+        wallet_address=wallet_address.lower(),
+        interval=interval,
+        count=len(rollups),
+    )
+
+
+@app.post(
+    "/api/wallets/{wallet_address}/rollups/{interval}/compute",
+    response_model=WalletMetricsRollupSchema,
+    tags=["Metrics"],
+)
+def compute_wallet_rollup(
+    wallet_address: str,
+    interval: str,
+) -> WalletMetricsRollupSchema:
+    """
+    Compute and store a metrics rollup for the current time window.
+
+    This computes win percentage, volume, and other metrics for the
+    current interval (1m, 1h, or 1d) and stores it for later retrieval.
+    """
+    from polymkt.services.positions import get_rollup_window_boundaries
+
+    if interval not in ("1m", "1h", "1d"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid interval: {interval}. Must be 1m, 1h, or 1d",
+        )
+
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    now = datetime.now(timezone.utc)
+    window_start, window_end = get_rollup_window_boundaries(now, interval)
+
+    rollup = metadata_store.compute_wallet_rollup(
+        wallet_address, interval, window_start, window_end
+    )
+    metadata_store.save_wallet_rollup(rollup)
+
+    return rollup
+
+
+@app.get(
+    "/api/wallets/{wallet_address}/volume",
+    tags=["Metrics"],
+)
+def get_wallet_volume(
+    wallet_address: str,
+    interval: str = "1d",
+    periods: int = 7,
+) -> dict[str, Any]:
+    """
+    Get wallet trading volume aggregated by interval.
+
+    Returns volume_usd for the last N periods at the specified interval.
+    Default is last 7 days of daily volume.
+    """
+    from polymkt.services.positions import get_rollup_window_boundaries
+
+    if interval not in ("1m", "1h", "1d"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid interval: {interval}. Must be 1m, 1h, or 1d",
+        )
+
+    if periods < 1 or periods > 1000:
+        raise HTTPException(
+            status_code=400,
+            detail="periods must be between 1 and 1000",
+        )
+
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    rollups = metadata_store.get_wallet_rollups(
+        wallet_address, interval, limit=periods
+    )
+
+    total_volume = sum(r.volume_usd for r in rollups)
+
+    return {
+        "wallet_address": wallet_address.lower(),
+        "interval": interval,
+        "periods": len(rollups),
+        "total_volume_usd": total_volume,
+        "volume_by_period": [
+            {
+                "window_start": r.window_start.isoformat(),
+                "window_end": r.window_end.isoformat(),
+                "volume_usd": r.volume_usd,
+                "trade_count": r.trade_count,
+            }
+            for r in rollups
+        ],
+    }
+
+
+@app.get(
+    "/api/wallets/{wallet_address}/win-rate",
+    tags=["Metrics"],
+)
+def get_wallet_win_rate(
+    wallet_address: str,
+    interval: str = "1d",
+    periods: int = 30,
+) -> dict[str, Any]:
+    """
+    Get wallet win percentage aggregated by interval.
+
+    Win % excludes positions closed with zero P&L per PRD requirement.
+    Returns win rate for the last N periods at the specified interval.
+    """
+    from polymkt.services.positions import get_rollup_window_boundaries
+
+    if interval not in ("1m", "1h", "1d"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid interval: {interval}. Must be 1m, 1h, or 1d",
+        )
+
+    if periods < 1 or periods > 1000:
+        raise HTTPException(
+            status_code=400,
+            detail="periods must be between 1 and 1000",
+        )
+
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    rollups = metadata_store.get_wallet_rollups(
+        wallet_address, interval, limit=periods
+    )
+
+    total_wins = sum(r.win_count for r in rollups)
+    total_losses = sum(r.loss_count for r in rollups)
+    total_closed = total_wins + total_losses
+
+    # Win percentage excludes zero P&L positions
+    win_percentage = (total_wins / total_closed) if total_closed > 0 else None
+
+    return {
+        "wallet_address": wallet_address.lower(),
+        "interval": interval,
+        "periods": len(rollups),
+        "total_wins": total_wins,
+        "total_losses": total_losses,
+        "total_closed_positions": total_closed,
+        "win_percentage": win_percentage,
+        "total_realized_pnl": sum(r.realized_pnl for r in rollups),
+        "win_rate_by_period": [
+            {
+                "window_start": r.window_start.isoformat(),
+                "window_end": r.window_end.isoformat(),
+                "win_count": r.win_count,
+                "loss_count": r.loss_count,
+                "win_percentage": (
+                    r.win_count / (r.win_count + r.loss_count)
+                    if (r.win_count + r.loss_count) > 0
+                    else None
+                ),
+                "realized_pnl": r.realized_pnl,
+            }
+            for r in rollups
+        ],
+    }

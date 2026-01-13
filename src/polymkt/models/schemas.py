@@ -1310,6 +1310,33 @@ class WalletMetricsSchema(BaseModel):
     total_volume_usd: float = Field(0.0, description="Total notional traded")
 
 
+class WalletMetricsRollupSchema(BaseModel):
+    """Time-based rollup of wallet metrics (1m, 1h, 1d intervals)."""
+
+    wallet_address: str = Field(..., description="Wallet address")
+    interval: str = Field(..., description="Rollup interval: 1m, 1h, or 1d")
+    window_start: datetime = Field(..., description="Start of the rollup window")
+    window_end: datetime = Field(..., description="End of the rollup window")
+    trade_count: int = Field(0, description="Number of trades in window")
+    buy_count: int = Field(0, description="Number of buy trades")
+    sell_count: int = Field(0, description="Number of sell trades")
+    volume_usd: float = Field(0.0, description="Total notional USD traded in window")
+    positions_opened: int = Field(0, description="New positions opened in window")
+    positions_closed: int = Field(0, description="Positions closed in window")
+    realized_pnl: float = Field(0.0, description="Realized P&L from positions closed in window")
+    win_count: int = Field(0, description="Winning positions closed in window")
+    loss_count: int = Field(0, description="Losing positions closed in window")
+
+
+class WalletMetricsRollupListResponse(BaseModel):
+    """Response for listing wallet metrics rollups."""
+
+    rollups: list[WalletMetricsRollupSchema] = Field(..., description="List of rollups")
+    wallet_address: str = Field(..., description="Wallet address")
+    interval: str = Field(..., description="Rollup interval")
+    count: int = Field(..., description="Number of rollups returned")
+
+
 class PositionListResponse(BaseModel):
     """Response for listing positions."""
 

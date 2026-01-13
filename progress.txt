@@ -3680,3 +3680,69 @@ Implemented wallet position tracking with average-cost accounting and 5-minute m
 - Bootstrap cloud data lake (S3/Parquet)
 - ClickHouse serving layer for rollups
 
+
+---
+
+## 2026-01-13: Win Percentage and Volume Metrics with Time Rollups
+
+### What was done:
+Added time-based rollup metrics (1m, 1h, 1d) for wallet trading performance tracking, building on the wallet position tracking feature.
+
+### Features implemented:
+
+1. **Rollup Schema and Storage** (`src/polymkt/models/schemas.py`, `src/polymkt/storage/metadata.py`)
+   - `WalletMetricsRollupSchema` with trade counts, volume, win/loss stats per window
+   - `wallet_metrics_rollups` table with unique constraint on (wallet, interval, window_start)
+   - Support for 1m (1-minute), 1h (1-hour), and 1d (1-day) intervals
+
+2. **Rollup Computation** (`src/polymkt/storage/metadata.py:1888-2159`)
+   - `compute_wallet_rollup()` aggregates from position_trades and closed_positions
+   - `save_wallet_rollup()` stores rollup with upsert semantics
+   - `get_wallet_rollups()` retrieves stored rollups by wallet/interval
+   - `compute_wallet_rollups_for_range()` backfills historical rollups
+
+3. **Window Boundary Function** (`src/polymkt/services/positions.py:415-445`)
+   - `get_rollup_window_boundaries()` aligns timestamps to 1m/1h/1d boundaries
+   - UTC-aligned for consistent cross-timezone behavior
+
+4. **API Endpoints** (`src/polymkt/api/main.py:3688-3884`)
+   - `GET /api/wallets/{address}/rollups/{interval}` - List rollups by interval
+   - `POST /api/wallets/{address}/rollups/{interval}/compute` - Compute current window
+   - `GET /api/wallets/{address}/volume` - Volume summary by period
+   - `GET /api/wallets/{address}/win-rate` - Win percentage by period
+
+### PRD requirements met:
+- Win % is computed per closed position ✓
+  - Computed in rollups from closed_positions table
+- A win is realized P&L > 0; loss < 0; P&L == 0 ignored ✓
+  - Win/loss counts only count non-zero P&L positions
+- Volume is tracked as notional USDC traded ✓
+  - `volume_usd` aggregated from position_trades.usd_amount
+- Expose metrics at 1m, 1h, and 1d rollups ✓
+  - All three intervals supported via interval parameter
+
+### Test results:
+- Backend tests: 660 passing
+- mypy typecheck: no errors
+
+### Files modified:
+- `src/polymkt/models/schemas.py` - Added WalletMetricsRollupSchema (~30 lines)
+- `src/polymkt/storage/metadata.py` - Added rollup table and methods (~280 lines)
+- `src/polymkt/services/positions.py` - Added get_rollup_window_boundaries (~30 lines)
+- `src/polymkt/services/__init__.py` - Export new function
+- `src/polymkt/api/main.py` - Added 4 metrics API endpoints (~200 lines)
+
+### PRD feature marked as passing:
+- Win percentage and volume metrics
+
+### Notes for next person:
+- Rollups are computed on-demand via API, not automatically
+- For historical backfill, use compute_wallet_rollups_for_range()
+- Win percentage excludes zero P&L positions per PRD requirement
+- Volume is tracked in USD notional (quantity * price)
+
+### Next steps for future sessions:
+- Bootstrap cloud data lake (S3/Parquet)
+- ClickHouse serving layer for rollups
+- LLM-driven analytics with guardrails
+

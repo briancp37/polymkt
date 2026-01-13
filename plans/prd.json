@@ -63,7 +63,7 @@
             "Volume is tracked as notional USDC traded",
             "Expose metrics at 1m, 1h, and 1d rollups"
         ],
-        "passes": false
+        "passes": true
     },
     {
         "category": "functional",

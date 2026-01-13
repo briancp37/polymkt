@@ -410,3 +410,36 @@ def get_5min_window_boundaries(timestamp: datetime) -> tuple[datetime, datetime]
     )
 
     return window_start, window_end
+
+
+def get_rollup_window_boundaries(
+    timestamp: datetime, interval: str
+) -> tuple[datetime, datetime]:
+    """
+    Get the window boundaries for a given timestamp and interval.
+
+    Args:
+        timestamp: The timestamp to align
+        interval: The rollup interval (1m, 1h, 1d)
+
+    Returns:
+        (window_start, window_end) tuple aligned to the interval
+    """
+    from datetime import timedelta
+
+    if interval == "1m":
+        # Align to minute boundary
+        window_start = timestamp.replace(second=0, microsecond=0)
+        window_end = window_start + timedelta(minutes=1)
+    elif interval == "1h":
+        # Align to hour boundary
+        window_start = timestamp.replace(minute=0, second=0, microsecond=0)
+        window_end = window_start + timedelta(hours=1)
+    elif interval == "1d":
+        # Align to day boundary (UTC)
+        window_start = timestamp.replace(hour=0, minute=0, second=0, microsecond=0)
+        window_end = window_start + timedelta(days=1)
+    else:
+        raise ValueError(f"Invalid interval: {interval}. Must be 1m, 1h, or 1d")
+
+    return window_start, window_end
