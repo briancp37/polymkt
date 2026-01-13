@@ -840,33 +840,45 @@ def _generate_trade_alerts(
                 match_side = "taker"
 
             if matched_address:
-                # Check for duplicate alert (same tx_hash and subscription)
-                existing = metadata_store.list_alerts(
-                    subscription_id=sub.id, limit=1000
-                )
-                is_duplicate = any(
-                    a.trade_data and a.trade_data.get("transaction_hash") == tx_hash
-                    for a in existing
-                )
+                market_id = market_id_col[i]
 
-                if not is_duplicate:
-                    trade_data = {
-                        "transaction_hash": tx_hash,
-                        "match_side": match_side,
-                        "timestamp": str(timestamp_col[i]),
-                        "side": side_col[i],
-                        "size": str(size_col[i]),
-                        "price": str(price_col[i]),
-                    }
-                    # Use tx_hash as event_id for deduplication
-                    metadata_store.create_alert(
+                # Check for duplicate alert (same tx_hash and subscription)
+                if metadata_store.alert_exists_for_event(tx_hash):
+                    continue
+
+                # Check cooldown window to prevent spam
+                if metadata_store.is_within_cooldown(
+                    subscription_id=sub.id,
+                    wallet_address=matched_address,
+                    market_id=market_id,
+                    cooldown_seconds=sub.cooldown_seconds,
+                ):
+                    run_logger.debug(
+                        "alert_skipped_cooldown",
                         subscription_id=sub.id,
-                        event_id=tx_hash,
-                        market_id=market_id_col[i],
-                        wallet_address=matched_address,
-                        trade_data=trade_data,
+                        wallet_address=matched_address[:10],
+                        market_id=market_id[:10],
+                        cooldown_seconds=sub.cooldown_seconds,
                     )
-                    alerts_created += 1
+                    continue
+
+                trade_data = {
+                    "transaction_hash": tx_hash,
+                    "match_side": match_side,
+                    "timestamp": str(timestamp_col[i]),
+                    "side": side_col[i],
+                    "size": str(size_col[i]),
+                    "price": str(price_col[i]),
+                }
+                # Use tx_hash as event_id for deduplication
+                metadata_store.create_alert(
+                    subscription_id=sub.id,
+                    event_id=tx_hash,
+                    market_id=market_id,
+                    wallet_address=matched_address,
+                    trade_data=trade_data,
+                )
+                alerts_created += 1
 
     if alerts_created > 0:
         run_logger.info("trade_alerts_generated", count=alerts_created)

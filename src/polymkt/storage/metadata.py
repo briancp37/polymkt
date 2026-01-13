@@ -793,6 +793,78 @@ class MetadataStore:
         finally:
             conn.close()
 
+    def get_last_alert_time(
+        self,
+        subscription_id: str,
+        wallet_address: str,
+        market_id: str,
+    ) -> datetime | None:
+        """
+        Get the timestamp of the last alert for a specific wallet/market combination.
+
+        Used for implementing per-rule cooldown windows to prevent alert spam.
+
+        Args:
+            subscription_id: The subscription to check
+            wallet_address: The wallet address (will be normalized to lowercase)
+            market_id: The market ID
+
+        Returns:
+            The triggered_at timestamp of the last alert, or None if no alerts exist
+        """
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute(
+                """
+                SELECT triggered_at FROM alerts
+                WHERE subscription_id = ?
+                AND wallet_address = ?
+                AND market_id = ?
+                ORDER BY triggered_at DESC
+                LIMIT 1
+                """,
+                (subscription_id, wallet_address.lower(), market_id),
+            )
+            row = cursor.fetchone()
+            if row:
+                return datetime.fromisoformat(row["triggered_at"])
+            return None
+        finally:
+            conn.close()
+
+    def is_within_cooldown(
+        self,
+        subscription_id: str,
+        wallet_address: str,
+        market_id: str,
+        cooldown_seconds: int,
+    ) -> bool:
+        """
+        Check if alerting for a wallet/market combination is within the cooldown window.
+
+        Args:
+            subscription_id: The subscription to check
+            wallet_address: The wallet address
+            market_id: The market ID
+            cooldown_seconds: The cooldown duration in seconds
+
+        Returns:
+            True if an alert was triggered within the cooldown window, False otherwise
+        """
+        if cooldown_seconds <= 0:
+            return False
+
+        last_alert_time = self.get_last_alert_time(
+            subscription_id, wallet_address, market_id
+        )
+        if not last_alert_time:
+            return False
+
+        now = datetime.now(timezone.utc)
+        elapsed_seconds = (now - last_alert_time).total_seconds()
+        return elapsed_seconds < cooldown_seconds
+
     def _row_to_alert(self, row: sqlite3.Row) -> AlertSchema:
         """Convert a database row to an AlertSchema."""
         return AlertSchema(
