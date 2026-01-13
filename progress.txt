@@ -3967,3 +3967,123 @@ curl http://localhost:8000/api/clickhouse/positions/0x123...
 ### Next steps for future sessions:
 - ClickHouse lifecycle management and backups
 - LLM-driven analytics with guardrails
+
+---
+
+## LLM-driven Analytics with Conservative Guardrails
+
+**Date:** 2026-01-13
+**Feature:** LLM-driven analytics with conservative guardrails
+**PRD Status:** PASSES
+
+### Summary:
+Implemented LLM-driven analytics interface with conservative guardrails that restrict queries to rollup tables, enforce wallet watchlist membership, apply time window defaults, and log all queries for audit.
+
+### Features implemented:
+
+1. **Query Guardrails** (`src/polymkt/services/llm_analytics.py`)
+   - `QueryGuardrails` class enforcing:
+     - Allowed tables: wallet_agg_1m, wallet_agg_1h, wallet_agg_1d, wallet_positions_current
+     - Blocked tables: raw_trades, raw_events, trades, events, order_filled
+     - Max rows returned: 10,000
+     - Max execution time: 30 seconds
+     - Default time window: 7 days
+   - `QueryValidationError` exception for guardrail violations
+
+2. **LLM Analytics Engine** (`src/polymkt/services/llm_analytics.py`)
+   - `LLMAnalyticsEngine` class with:
+     - `query_wallet_rollups()` - Query rollups with wallet watchlist validation
+     - `query_wallet_positions()` - Query positions with watchlist validation
+     - `execute_raw_sql()` - Execute raw SQL with table/wallet validation
+     - `get_query_log()` - Retrieve audit log of executed queries
+     - `get_guardrails_config()` - Get current guardrails configuration
+   - Caches watched wallets with 60-second TTL for performance
+   - Logs all queries (success, validation_error, error) to SQLite
+
+3. **Query Logging Table** (auto-created in SQLite metadata store)
+   - `llm_query_log` table storing:
+     - query_id, sql, parameters, wallet_addresses
+     - execution_time_ms, rows_read, status
+     - error_message (if failed), executed_at
+
+4. **LLM Analytics Schemas** (`src/polymkt/models/schemas.py:1527-1638`)
+   - `LLMAnalyticsGuardrailsConfig` - Guardrails configuration
+   - `LLMAnalyticsRollupRequest` - Rollup query request
+   - `LLMAnalyticsPositionsRequest` - Positions query request
+   - `LLMAnalyticsRawSQLRequest` - Raw SQL query request
+   - `LLMAnalyticsQueryResult` - Query results with metadata
+   - `LLMAnalyticsRawSQLResult` - Raw SQL results
+   - `LLMQueryLogEntry` / `LLMQueryLogResponse` - Audit log schemas
+
+5. **API Endpoints** (`src/polymkt/api/main.py:4309-4546`)
+   - `GET /api/llm-analytics/guardrails` - Get guardrails config
+   - `POST /api/llm-analytics/query/rollups` - Query rollups with guardrails
+   - `POST /api/llm-analytics/query/positions` - Query positions with guardrails
+   - `POST /api/llm-analytics/query/sql` - Execute raw SQL with guardrails
+   - `GET /api/llm-analytics/query-log` - Get query audit log
+
+### PRD requirements met:
+- Expose an analytics query interface callable by LLM and UI ✓
+  - Four API endpoints for guardrails, rollups, positions, and raw SQL
+- Restrict LLM queries to ClickHouse rollup tables only ✓
+  - `validate_table_access()` checks SQL against ALLOWED_TABLES
+- Restrict LLM queries to wallets present in the watchlist ✓
+  - `validate_wallet_access()` checks against all watchlist_items
+- Apply default time window limit of 7 days unless explicitly overridden ✓
+  - `apply_time_window()` uses DEFAULT_TIME_WINDOW_DAYS = 7
+- Enforce hard limits: max rows returned (10k), max execution time (30s) ✓
+  - MAX_ROWS_RETURNED = 10,000, MAX_EXECUTION_TIME_SECONDS = 30
+  - ClickHouse settings: max_execution_time, max_result_rows
+- Reject queries that attempt to access raw event tables ✓
+  - BLOCKED_TABLES includes raw_trades, raw_events, trades, events
+- Log executed SQL, parameters, execution time, and rows read ✓
+  - `_log_query()` persists to llm_query_log table in SQLite
+
+### Test results:
+- Backend tests: 660 passing
+- mypy typecheck: no errors
+
+### Files created:
+- `src/polymkt/services/llm_analytics.py` - LLM analytics engine (~600 lines)
+
+### Files modified:
+- `src/polymkt/models/schemas.py` - Added LLM analytics schemas (~115 lines)
+- `src/polymkt/api/main.py` - Added 5 LLM analytics API endpoints (~240 lines)
+- `plans/prd.json` - Marked feature as passing
+
+### PRD feature marked as passing:
+- LLM-driven analytics with conservative guardrails
+
+### Notes for next person:
+- Guardrails are enforced at the application layer, not ClickHouse
+- Wallet watchlist membership is cached for 60 seconds for performance
+- Query log table is auto-created on first query
+- All LLM analytics endpoints require ClickHouse to be enabled
+- 403 Forbidden returned if guardrails are violated
+
+### API usage examples:
+```bash
+# Get guardrails configuration
+curl http://localhost:8000/api/llm-analytics/guardrails
+
+# Query rollups (wallet must be in watchlist)
+curl -X POST http://localhost:8000/api/llm-analytics/query/rollups \
+  -H "Content-Type: application/json" \
+  -d '{"wallet_address": "0x63ce342161250d705dc0b16df89036c8e5f9ba9a", "interval": "1d"}'
+
+# Query positions
+curl -X POST http://localhost:8000/api/llm-analytics/query/positions \
+  -H "Content-Type: application/json" \
+  -d '{"wallet_address": "0x63ce342161250d705dc0b16df89036c8e5f9ba9a"}'
+
+# Execute raw SQL (only allowed tables)
+curl -X POST http://localhost:8000/api/llm-analytics/query/sql \
+  -H "Content-Type: application/json" \
+  -d '{"sql": "SELECT * FROM wallet_agg_1d WHERE wallet_address = :wallet", "wallet_addresses": ["0x63ce342161250d705dc0b16df89036c8e5f9ba9a"], "parameters": {"wallet": "0x63ce342161250d705dc0b16df89036c8e5f9ba9a"}}'
+
+# Get query audit log
+curl "http://localhost:8000/api/llm-analytics/query-log?limit=10&status=success"
+```
+
+### Next steps for future sessions:
+- ClickHouse lifecycle management and backups (only remaining feature)

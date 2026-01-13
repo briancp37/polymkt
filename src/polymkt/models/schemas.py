@@ -1522,3 +1522,117 @@ class ClickHouseInitResult(BaseModel):
         default_factory=list, description="Tables that were created"
     )
     error_message: str | None = Field(None, description="Error message if failed")
+
+
+# =============================================================================
+# LLM Analytics Schemas
+# =============================================================================
+
+
+class LLMAnalyticsGuardrailsConfig(BaseModel):
+    """Configuration for LLM analytics guardrails."""
+
+    max_rows_returned: int = Field(
+        10000, description="Maximum rows that can be returned"
+    )
+    max_execution_time_seconds: int = Field(
+        30, description="Maximum query execution time in seconds"
+    )
+    default_time_window_days: int = Field(
+        7, description="Default time window if not specified"
+    )
+    allowed_tables: list[str] = Field(
+        default_factory=list, description="Tables that can be queried"
+    )
+    blocked_tables: list[str] = Field(
+        default_factory=list, description="Tables that are blocked"
+    )
+
+
+class LLMAnalyticsRollupRequest(BaseModel):
+    """Request to query wallet rollups via LLM analytics."""
+
+    wallet_address: str = Field(
+        ..., pattern=r"^0x[a-fA-F0-9]{40}$", description="Ethereum wallet address"
+    )
+    interval: str = Field("1d", description="Rollup interval (1m, 1h, 1d)")
+    start_time: datetime | None = Field(None, description="Query start time")
+    end_time: datetime | None = Field(None, description="Query end time")
+    limit: int | None = Field(None, ge=1, le=10000, description="Max rows to return")
+
+
+class LLMAnalyticsPositionsRequest(BaseModel):
+    """Request to query wallet positions via LLM analytics."""
+
+    wallet_address: str = Field(
+        ..., pattern=r"^0x[a-fA-F0-9]{40}$", description="Ethereum wallet address"
+    )
+    market_id: str | None = Field(None, description="Optional market filter")
+    limit: int | None = Field(None, ge=1, le=10000, description="Max rows to return")
+
+
+class LLMAnalyticsRawSQLRequest(BaseModel):
+    """Request to execute raw SQL via LLM analytics with guardrails."""
+
+    sql: str = Field(..., min_length=1, description="SQL query to execute")
+    wallet_addresses: list[str] = Field(
+        ..., min_length=1, description="Wallet addresses being queried"
+    )
+    parameters: dict[str, Any] | None = Field(None, description="Query parameters")
+    limit: int | None = Field(None, ge=1, le=10000, description="Max rows to return")
+
+
+class LLMAnalyticsQueryResult(BaseModel):
+    """Result from an LLM analytics query."""
+
+    query_id: str = Field(..., description="Unique query ID for audit")
+    wallet_address: str | None = Field(None, description="Queried wallet address")
+    interval: str | None = Field(None, description="Rollup interval if applicable")
+    start_time: str | None = Field(None, description="Query start time")
+    end_time: str | None = Field(None, description="Query end time")
+    limit_applied: int = Field(..., description="Row limit that was applied")
+    rows_returned: int = Field(..., description="Number of rows returned")
+    execution_time_ms: float = Field(..., description="Execution time in milliseconds")
+    data: list[dict[str, Any]] = Field(
+        default_factory=list, description="Query results"
+    )
+
+
+class LLMAnalyticsRawSQLResult(BaseModel):
+    """Result from a raw SQL query via LLM analytics."""
+
+    query_id: str = Field(..., description="Unique query ID for audit")
+    sql: str = Field(..., description="Executed SQL query")
+    limit_applied: int = Field(..., description="Row limit that was applied")
+    rows_returned: int = Field(..., description="Number of rows returned")
+    execution_time_ms: float = Field(..., description="Execution time in milliseconds")
+    results: list[dict[str, Any]] = Field(
+        default_factory=list, description="Query results"
+    )
+
+
+class LLMQueryLogEntry(BaseModel):
+    """A single entry in the LLM query log."""
+
+    id: str = Field(..., description="Query ID")
+    sql: str = Field(..., description="SQL query executed")
+    parameters: dict[str, Any] = Field(
+        default_factory=dict, description="Query parameters"
+    )
+    wallet_addresses: list[str] = Field(
+        default_factory=list, description="Wallet addresses queried"
+    )
+    execution_time_ms: float = Field(..., description="Execution time in ms")
+    rows_read: int = Field(..., description="Number of rows returned")
+    status: str = Field(..., description="Query status (success, error, validation_error)")
+    error_message: str | None = Field(None, description="Error message if failed")
+    executed_at: str = Field(..., description="Execution timestamp")
+
+
+class LLMQueryLogResponse(BaseModel):
+    """Response containing query log entries."""
+
+    entries: list[LLMQueryLogEntry] = Field(
+        default_factory=list, description="Query log entries"
+    )
+    count: int = Field(..., description="Number of entries returned")

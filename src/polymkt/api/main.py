@@ -101,6 +101,15 @@ from polymkt.models.schemas import (
     ClickHouseSyncResult,
     ClickHouseQueryRequest,
     ClickHouseInitResult,
+    # LLM Analytics schemas
+    LLMAnalyticsGuardrailsConfig,
+    LLMAnalyticsRollupRequest,
+    LLMAnalyticsPositionsRequest,
+    LLMAnalyticsRawSQLRequest,
+    LLMAnalyticsQueryResult,
+    LLMAnalyticsRawSQLResult,
+    LLMQueryLogEntry,
+    LLMQueryLogResponse,
 )
 from polymkt.pipeline.bootstrap import run_bootstrap
 from polymkt.pipeline.curate import run_curate
@@ -4295,3 +4304,243 @@ def query_clickhouse_positions(
         raise HTTPException(status_code=500, detail=f"Query failed: {e}")
     finally:
         layer.close()
+
+
+# =============================================================================
+# LLM Analytics Endpoints (with Conservative Guardrails)
+# =============================================================================
+
+
+@app.get(
+    "/api/llm-analytics/guardrails",
+    response_model=LLMAnalyticsGuardrailsConfig,
+    tags=["LLM Analytics"],
+)
+def get_llm_analytics_guardrails() -> LLMAnalyticsGuardrailsConfig:
+    """
+    Get the current LLM analytics guardrails configuration.
+
+    Returns the limits and restrictions applied to all LLM analytics queries:
+    - Maximum rows that can be returned
+    - Maximum execution time
+    - Default time window
+    - Allowed and blocked tables
+    """
+    from polymkt.services.llm_analytics import get_llm_analytics_engine
+
+    engine = get_llm_analytics_engine()
+    config = engine.get_guardrails_config()
+    return LLMAnalyticsGuardrailsConfig(**config)
+
+
+@app.post(
+    "/api/llm-analytics/query/rollups",
+    response_model=LLMAnalyticsQueryResult,
+    tags=["LLM Analytics"],
+)
+def query_llm_analytics_rollups(
+    request: LLMAnalyticsRollupRequest,
+) -> LLMAnalyticsQueryResult:
+    """
+    Query wallet rollups with LLM analytics guardrails.
+
+    This endpoint enforces:
+    - Wallet must be in a watchlist
+    - Default 7-day time window if not specified
+    - Maximum 10,000 rows returned
+    - 30-second execution timeout
+    - Query is logged for audit
+
+    Args:
+        request: Rollup query parameters
+
+    Returns:
+        Query results with metadata
+    """
+    if not settings.clickhouse_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="ClickHouse is not enabled. Set POLYMKT_CLICKHOUSE_ENABLED=true",
+        )
+
+    from polymkt.services.llm_analytics import (
+        QueryValidationError,
+        get_llm_analytics_engine,
+    )
+
+    engine = get_llm_analytics_engine()
+
+    try:
+        result = engine.query_wallet_rollups(
+            wallet_address=request.wallet_address,
+            interval=request.interval,
+            start_time=request.start_time,
+            end_time=request.end_time,
+            limit=request.limit,
+        )
+        return LLMAnalyticsQueryResult(
+            query_id=result["query_id"],
+            wallet_address=result["wallet_address"],
+            interval=result["interval"],
+            start_time=result["start_time"],
+            end_time=result["end_time"],
+            limit_applied=result["limit_applied"],
+            rows_returned=result["rows_returned"],
+            execution_time_ms=result["execution_time_ms"],
+            data=result["rollups"],
+        )
+    except QueryValidationError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query failed: {e}")
+
+
+@app.post(
+    "/api/llm-analytics/query/positions",
+    response_model=LLMAnalyticsQueryResult,
+    tags=["LLM Analytics"],
+)
+def query_llm_analytics_positions(
+    request: LLMAnalyticsPositionsRequest,
+) -> LLMAnalyticsQueryResult:
+    """
+    Query wallet positions with LLM analytics guardrails.
+
+    This endpoint enforces:
+    - Wallet must be in a watchlist
+    - Maximum 10,000 rows returned
+    - 30-second execution timeout
+    - Query is logged for audit
+
+    Args:
+        request: Position query parameters
+
+    Returns:
+        Query results with metadata
+    """
+    if not settings.clickhouse_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="ClickHouse is not enabled. Set POLYMKT_CLICKHOUSE_ENABLED=true",
+        )
+
+    from polymkt.services.llm_analytics import (
+        QueryValidationError,
+        get_llm_analytics_engine,
+    )
+
+    engine = get_llm_analytics_engine()
+
+    try:
+        result = engine.query_wallet_positions(
+            wallet_address=request.wallet_address,
+            market_id=request.market_id,
+            limit=request.limit,
+        )
+        return LLMAnalyticsQueryResult(
+            query_id=result["query_id"],
+            wallet_address=result["wallet_address"],
+            interval=None,
+            start_time=None,
+            end_time=None,
+            limit_applied=result["limit_applied"],
+            rows_returned=result["rows_returned"],
+            execution_time_ms=result["execution_time_ms"],
+            data=result["positions"],
+        )
+    except QueryValidationError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query failed: {e}")
+
+
+@app.post(
+    "/api/llm-analytics/query/sql",
+    response_model=LLMAnalyticsRawSQLResult,
+    tags=["LLM Analytics"],
+)
+def query_llm_analytics_raw_sql(
+    request: LLMAnalyticsRawSQLRequest,
+) -> LLMAnalyticsRawSQLResult:
+    """
+    Execute raw SQL with LLM analytics guardrails.
+
+    This is the most flexible query method but has strict validation:
+    - SQL must only reference allowed rollup tables
+    - Access to raw_trades and raw_events tables is blocked
+    - All wallet addresses must be in a watchlist
+    - Maximum 10,000 rows returned
+    - 30-second execution timeout
+    - Query is logged for audit
+
+    Args:
+        request: Raw SQL query and parameters
+
+    Returns:
+        Query results with metadata
+    """
+    if not settings.clickhouse_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="ClickHouse is not enabled. Set POLYMKT_CLICKHOUSE_ENABLED=true",
+        )
+
+    from polymkt.services.llm_analytics import (
+        QueryValidationError,
+        get_llm_analytics_engine,
+    )
+
+    engine = get_llm_analytics_engine()
+
+    try:
+        result = engine.execute_raw_sql(
+            sql=request.sql,
+            wallet_addresses=request.wallet_addresses,
+            parameters=request.parameters,
+            limit=request.limit,
+        )
+        return LLMAnalyticsRawSQLResult(
+            query_id=result["query_id"],
+            sql=result["sql"],
+            limit_applied=result["limit_applied"],
+            rows_returned=result["rows_returned"],
+            execution_time_ms=result["execution_time_ms"],
+            results=result["results"],
+        )
+    except QueryValidationError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query failed: {e}")
+
+
+@app.get(
+    "/api/llm-analytics/query-log",
+    response_model=LLMQueryLogResponse,
+    tags=["LLM Analytics"],
+)
+def get_llm_analytics_query_log(
+    limit: int = 100,
+    status: str | None = None,
+) -> LLMQueryLogResponse:
+    """
+    Get the LLM analytics query log.
+
+    Returns recent queries executed through the LLM analytics interface,
+    including execution time, rows read, and any errors.
+
+    Args:
+        limit: Maximum entries to return (default 100)
+        status: Filter by status (success, error, validation_error)
+
+    Returns:
+        List of query log entries
+    """
+    from polymkt.services.llm_analytics import get_llm_analytics_engine
+
+    engine = get_llm_analytics_engine()
+    entries = engine.get_query_log(limit=limit, status=status)
+
+    return LLMQueryLogResponse(
+        entries=[LLMQueryLogEntry(**entry) for entry in entries],
+        count=len(entries),
+    )

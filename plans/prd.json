@@ -101,7 +101,7 @@
             "Reject queries that attempt to access raw event tables",
             "Log executed SQL, parameters, execution time, and rows read to ops metadata store"
         ],
-        "passes": false
+        "passes": true
     },
     {
         "category": "functional",
