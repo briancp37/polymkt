@@ -3853,3 +3853,117 @@ curl -X POST http://localhost:8000/api/data-lake/verify
 - ClickHouse lifecycle management
 - LLM-driven analytics with guardrails
 
+
+---
+
+## ClickHouse Serving Layer for Rollups and Recent Drilldowns
+
+**Date:** 2026-01-13
+**Feature:** ClickHouse serving layer for rollups and recent drilldowns
+**PRD Status:** PASSES
+
+### Summary:
+Implemented ClickHouse serving layer that provides fast analytics queries over wallet metrics rollups and positions. ClickHouse acts as a read-optimized copy of data from SQLite (source of truth), with configurable TTLs for different rollup intervals.
+
+### Features implemented:
+
+1. **ClickHouse Configuration** (`src/polymkt/config.py`)
+   - `clickhouse_host`: ClickHouse host (default: localhost)
+   - `clickhouse_port`: Native protocol port (default: 9000)
+   - `clickhouse_http_port`: HTTP port for connect library (default: 8123)
+   - `clickhouse_database`: Database name (default: polymkt)
+   - `clickhouse_user`: Username (default: default)
+   - `clickhouse_password`: Password (default: empty)
+   - `clickhouse_enabled`: Feature flag (default: False)
+   - `clickhouse_raw_retention_days`: Raw trades retention (default: 30)
+
+2. **ClickHouse Storage Layer** (`src/polymkt/storage/clickhouse.py`)
+   - DDL for rollup tables with ReplacingMergeTree engine:
+     - `wallet_agg_1m`: 1-minute rollups (90-day TTL)
+     - `wallet_agg_1h`: 1-hour rollups (1-year TTL)
+     - `wallet_agg_1d`: 1-day rollups (no TTL)
+     - `wallet_positions_current`: Current positions
+     - `raw_trades`: Raw trades with configurable retention TTL
+   - `ClickHouseLayer` class with:
+     - `connect()` / `close()` - Connection management
+     - `initialize_tables()` - Create all tables
+     - `sync_rollups_from_sqlite()` - Sync rollup data by interval
+     - `sync_positions_from_sqlite()` - Sync current positions
+     - `query_wallet_rollups()` - Query rollups with time filters
+     - `query_wallet_positions()` - Query positions by wallet/market
+     - `get_table_stats()` - Get per-table statistics
+
+3. **ClickHouse Schemas** (`src/polymkt/models/schemas.py:1448-1524`)
+   - `ClickHouseTableStats` - Per-table statistics (row count, bytes, partitions)
+   - `ClickHouseStatusSchema` - Connection status and table stats
+   - `ClickHouseSyncRequest` - Sync configuration (interval, wallet filter)
+   - `ClickHouseSyncResult` - Sync operation result
+   - `ClickHouseQueryRequest` - Query parameters
+   - `ClickHouseInitResult` - Table initialization result
+
+4. **API Endpoints** (`src/polymkt/api/main.py:3992-4297`)
+   - `GET /api/clickhouse/status` - Check ClickHouse status and table stats
+   - `POST /api/clickhouse/init` - Initialize all ClickHouse tables
+   - `POST /api/clickhouse/sync` - Sync data from SQLite to ClickHouse
+   - `POST /api/clickhouse/query/rollups` - Query wallet rollups
+   - `GET /api/clickhouse/positions/{wallet}` - Query wallet positions
+
+### PRD requirements met:
+- Create rollup tables: wallet_agg_1m, wallet_agg_1h, wallet_agg_1d ✓
+  - DDL with ReplacingMergeTree and appropriate TTLs
+- Create wallet_positions_current table ✓
+  - DDL with deduplication via inserted_at version
+- Optionally retain raw events in ClickHouse for last 30 days ✓
+  - raw_trades table with configurable TTL via clickhouse_raw_retention_days
+- All historical raw data remains in S3 Parquet as source of truth ✓
+  - SQLite is primary store, ClickHouse is read-optimized copy
+  - sync endpoints populate ClickHouse from SQLite
+
+### Test results:
+- Backend tests: 660 passing
+- mypy typecheck: no errors
+
+### Files created:
+- `src/polymkt/storage/clickhouse.py` - ClickHouse storage layer (~630 lines)
+
+### Files modified:
+- `src/polymkt/config.py` - Added ClickHouse settings
+- `src/polymkt/models/schemas.py` - Added ClickHouse schemas (~80 lines)
+- `src/polymkt/api/main.py` - Added 5 ClickHouse API endpoints (~310 lines)
+- `pyproject.toml` - Added clickhouse_connect to mypy ignores
+
+### PRD feature marked as passing:
+- ClickHouse serving layer for rollups and recent drilldowns
+
+### Notes for next person:
+- ClickHouse is optional - disabled by default via POLYMKT_CLICKHOUSE_ENABLED
+- Requires clickhouse-connect library (optional dependency)
+- Tables use ReplacingMergeTree for deduplication
+- Sync is one-way: SQLite -> ClickHouse (SQLite is source of truth)
+- Query endpoints use FINAL keyword for deduplicated results
+
+### API usage examples:
+```bash
+# Check ClickHouse status
+curl http://localhost:8000/api/clickhouse/status
+
+# Initialize tables
+curl -X POST http://localhost:8000/api/clickhouse/init
+
+# Sync 1-day rollups from SQLite
+curl -X POST http://localhost:8000/api/clickhouse/sync \
+  -H "Content-Type: application/json" \
+  -d '{"interval": "1d", "sync_rollups": true, "sync_positions": true}'
+
+# Query wallet rollups
+curl -X POST http://localhost:8000/api/clickhouse/query/rollups \
+  -H "Content-Type: application/json" \
+  -d '{"wallet_address": "0x123...", "interval": "1d", "limit": 100}'
+
+# Query wallet positions
+curl http://localhost:8000/api/clickhouse/positions/0x123...
+```
+
+### Next steps for future sessions:
+- ClickHouse lifecycle management and backups
+- LLM-driven analytics with guardrails

@@ -94,6 +94,13 @@ from polymkt.models.schemas import (
     CloudBootstrapResult,
     CloudBootstrapVerificationReport,
     S3DataLakeStatus,
+    # ClickHouse serving layer schemas
+    ClickHouseStatusSchema,
+    ClickHouseTableStats,
+    ClickHouseSyncRequest,
+    ClickHouseSyncResult,
+    ClickHouseQueryRequest,
+    ClickHouseInitResult,
 )
 from polymkt.pipeline.bootstrap import run_bootstrap
 from polymkt.pipeline.curate import run_curate
@@ -3980,3 +3987,311 @@ def verify_data_lake(
         parquet_dir=settings.parquet_dir,
         sample_size=sample_size,
     )
+
+
+# =============================================================================
+# ClickHouse Serving Layer Endpoints
+# =============================================================================
+
+
+@app.get(
+    "/api/clickhouse/status",
+    response_model=ClickHouseStatusSchema,
+    tags=["ClickHouse"],
+)
+def get_clickhouse_status() -> ClickHouseStatusSchema:
+    """
+    Get the current status of the ClickHouse serving layer.
+
+    Returns information about:
+    - Whether ClickHouse is enabled and connected
+    - Connection details (host, port, database)
+    - Per-table statistics (row counts, sizes, partitions)
+    - Raw trades retention settings
+    """
+    from polymkt.storage.clickhouse import ClickHouseLayer
+
+    tables: list[ClickHouseTableStats] = []
+
+    if not settings.clickhouse_enabled:
+        return ClickHouseStatusSchema(
+            enabled=False,
+            connected=False,
+            host=settings.clickhouse_host,
+            port=settings.clickhouse_http_port,
+            database=settings.clickhouse_database,
+            tables=tables,
+            raw_trades_retention_days=settings.clickhouse_raw_retention_days,
+        )
+
+    layer = ClickHouseLayer()
+    connected = layer.connect()
+
+    if connected:
+        stats = layer.get_table_stats()
+        for table_name, table_stats in stats.items():
+            tables.append(
+                ClickHouseTableStats(
+                    table_name=table_name,
+                    exists=table_stats.get("exists", False),
+                    row_count=table_stats.get("row_count"),
+                    bytes=table_stats.get("bytes"),
+                    partitions=table_stats.get("partitions"),
+                )
+            )
+        layer.close()
+
+    return ClickHouseStatusSchema(
+        enabled=settings.clickhouse_enabled,
+        connected=connected,
+        host=settings.clickhouse_host,
+        port=settings.clickhouse_http_port,
+        database=settings.clickhouse_database,
+        tables=tables,
+        raw_trades_retention_days=settings.clickhouse_raw_retention_days,
+    )
+
+
+@app.post(
+    "/api/clickhouse/init",
+    response_model=ClickHouseInitResult,
+    tags=["ClickHouse"],
+)
+def init_clickhouse_tables(
+    include_raw_trades: bool = True,
+) -> ClickHouseInitResult:
+    """
+    Initialize ClickHouse tables for the analytics serving layer.
+
+    Creates the following tables if they don't exist:
+    - wallet_agg_1m: 1-minute wallet metrics rollups (90-day TTL)
+    - wallet_agg_1h: 1-hour wallet metrics rollups (1-year TTL)
+    - wallet_agg_1d: 1-day wallet metrics rollups (no TTL)
+    - wallet_positions_current: Current wallet positions
+    - raw_trades: Raw trades with configurable retention (optional)
+
+    Args:
+        include_raw_trades: Whether to create the raw_trades table
+
+    Returns:
+        ClickHouseInitResult with list of tables created
+    """
+    if not settings.clickhouse_enabled:
+        return ClickHouseInitResult(
+            success=False,
+            tables_created=[],
+            error_message="ClickHouse is not enabled. Set POLYMKT_CLICKHOUSE_ENABLED=true",
+        )
+
+    from polymkt.storage.clickhouse import ClickHouseLayer
+
+    layer = ClickHouseLayer()
+    if not layer.connect():
+        return ClickHouseInitResult(
+            success=False,
+            tables_created=[],
+            error_message="Failed to connect to ClickHouse",
+        )
+
+    try:
+        created = layer.initialize_tables(include_raw_trades=include_raw_trades)
+        return ClickHouseInitResult(
+            success=True,
+            tables_created=created,
+            error_message=None,
+        )
+    except Exception as e:
+        return ClickHouseInitResult(
+            success=False,
+            tables_created=[],
+            error_message=str(e),
+        )
+    finally:
+        layer.close()
+
+
+@app.post(
+    "/api/clickhouse/sync",
+    response_model=ClickHouseSyncResult,
+    tags=["ClickHouse"],
+)
+def sync_to_clickhouse(
+    request: ClickHouseSyncRequest,
+) -> ClickHouseSyncResult:
+    """
+    Sync rollup and position data from SQLite to ClickHouse.
+
+    This endpoint syncs data from the SQLite metadata store to ClickHouse
+    for fast analytics queries. Data in SQLite is the source of truth;
+    ClickHouse is a read-optimized copy.
+
+    Args:
+        request: Sync configuration (interval, wallet filter, what to sync)
+
+    Returns:
+        ClickHouseSyncResult with counts of synced data
+    """
+    if not settings.clickhouse_enabled:
+        return ClickHouseSyncResult(
+            success=False,
+            rollups_synced=0,
+            positions_synced=0,
+            interval=request.interval,
+            wallet_address=request.wallet_address,
+            error_message="ClickHouse is not enabled. Set POLYMKT_CLICKHOUSE_ENABLED=true",
+        )
+
+    from polymkt.storage.clickhouse import ClickHouseLayer
+
+    layer = ClickHouseLayer()
+    if not layer.connect():
+        return ClickHouseSyncResult(
+            success=False,
+            rollups_synced=0,
+            positions_synced=0,
+            interval=request.interval,
+            wallet_address=request.wallet_address,
+            error_message="Failed to connect to ClickHouse",
+        )
+
+    try:
+        rollups_synced = 0
+        positions_synced = 0
+
+        if request.sync_rollups:
+            rollups_synced = layer.sync_rollups_from_sqlite(
+                interval=request.interval,
+                wallet_address=request.wallet_address,
+            )
+
+        if request.sync_positions:
+            positions_synced = layer.sync_positions_from_sqlite(
+                wallet_address=request.wallet_address,
+            )
+
+        return ClickHouseSyncResult(
+            success=True,
+            rollups_synced=rollups_synced,
+            positions_synced=positions_synced,
+            interval=request.interval,
+            wallet_address=request.wallet_address,
+            error_message=None,
+        )
+    except Exception as e:
+        return ClickHouseSyncResult(
+            success=False,
+            rollups_synced=0,
+            positions_synced=0,
+            interval=request.interval,
+            wallet_address=request.wallet_address,
+            error_message=str(e),
+        )
+    finally:
+        layer.close()
+
+
+@app.post(
+    "/api/clickhouse/query/rollups",
+    tags=["ClickHouse"],
+)
+def query_clickhouse_rollups(
+    request: ClickHouseQueryRequest,
+) -> dict[str, Any]:
+    """
+    Query wallet rollups from ClickHouse.
+
+    This is a fast read path for analytics queries. Returns rollup data
+    for a specific wallet at the requested interval.
+
+    Args:
+        request: Query parameters (wallet, interval, time range, limit)
+
+    Returns:
+        Dict with rollup data rows
+    """
+    if not settings.clickhouse_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="ClickHouse is not enabled. Set POLYMKT_CLICKHOUSE_ENABLED=true",
+        )
+
+    from polymkt.storage.clickhouse import ClickHouseLayer
+
+    layer = ClickHouseLayer()
+    if not layer.connect():
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to connect to ClickHouse",
+        )
+
+    try:
+        results = layer.query_wallet_rollups(
+            wallet_address=request.wallet_address,
+            interval=request.interval,
+            start_time=request.start_time,
+            end_time=request.end_time,
+            limit=request.limit,
+        )
+        return {
+            "wallet_address": request.wallet_address,
+            "interval": request.interval,
+            "count": len(results),
+            "rollups": results,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query failed: {e}")
+    finally:
+        layer.close()
+
+
+@app.get(
+    "/api/clickhouse/positions/{wallet_address}",
+    tags=["ClickHouse"],
+)
+def query_clickhouse_positions(
+    wallet_address: str,
+    market_id: str | None = None,
+) -> dict[str, Any]:
+    """
+    Query current positions from ClickHouse.
+
+    This is a fast read path for position queries. Returns the current
+    positions for a wallet, optionally filtered by market.
+
+    Args:
+        wallet_address: Wallet address to query
+        market_id: Optional market filter
+
+    Returns:
+        Dict with position data rows
+    """
+    if not settings.clickhouse_enabled:
+        raise HTTPException(
+            status_code=400,
+            detail="ClickHouse is not enabled. Set POLYMKT_CLICKHOUSE_ENABLED=true",
+        )
+
+    from polymkt.storage.clickhouse import ClickHouseLayer
+
+    layer = ClickHouseLayer()
+    if not layer.connect():
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to connect to ClickHouse",
+        )
+
+    try:
+        results = layer.query_wallet_positions(
+            wallet_address=wallet_address,
+            market_id=market_id,
+        )
+        return {
+            "wallet_address": wallet_address,
+            "market_id": market_id,
+            "count": len(results),
+            "positions": results,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Query failed: {e}")
+    finally:
+        layer.close()

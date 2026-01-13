@@ -48,5 +48,15 @@ class Settings(BaseSettings):
     s3_curated_prefix: str = "curated/polymarket"
     s3_enabled: bool = False  # Set True to enable S3 upload
 
+    # ClickHouse settings for analytics serving layer
+    clickhouse_host: str = "localhost"
+    clickhouse_port: int = 9000
+    clickhouse_http_port: int = 8123
+    clickhouse_database: str = "polymkt"
+    clickhouse_user: str = "default"
+    clickhouse_password: str = ""
+    clickhouse_enabled: bool = False  # Set True to enable ClickHouse
+    clickhouse_raw_retention_days: int = 30  # Days to keep raw events
+
 
 settings = Settings()

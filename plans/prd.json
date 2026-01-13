@@ -75,7 +75,7 @@
             "Optionally retain raw events in ClickHouse for last 30 days",
             "All historical raw data remains in S3 Parquet as source of truth"
         ],
-        "passes": false
+        "passes": true
     },
     {
         "category": "functional",

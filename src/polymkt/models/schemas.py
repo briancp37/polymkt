@@ -1443,3 +1443,82 @@ class S3DataLakeStatus(BaseModel):
     bootstrap_required: bool = Field(
         True, description="True if bootstrap is required"
     )
+
+
+# =============================================================================
+# ClickHouse Serving Layer Schemas
+# =============================================================================
+
+
+class ClickHouseTableStats(BaseModel):
+    """Statistics for a single ClickHouse table."""
+
+    table_name: str = Field(..., description="Table name")
+    exists: bool = Field(False, description="Whether table exists")
+    row_count: int | None = Field(None, description="Number of rows")
+    bytes: int | None = Field(None, description="Size in bytes")
+    partitions: int | None = Field(None, description="Number of partitions")
+
+
+class ClickHouseStatusSchema(BaseModel):
+    """Status of the ClickHouse serving layer."""
+
+    enabled: bool = Field(False, description="Whether ClickHouse is enabled in config")
+    connected: bool = Field(False, description="Whether connected to ClickHouse")
+    host: str = Field(..., description="ClickHouse host")
+    port: int = Field(..., description="ClickHouse HTTP port")
+    database: str = Field(..., description="ClickHouse database")
+    tables: list[ClickHouseTableStats] = Field(
+        default_factory=list, description="Per-table statistics"
+    )
+    raw_trades_retention_days: int = Field(
+        30, description="Days to retain raw trades"
+    )
+
+
+class ClickHouseSyncRequest(BaseModel):
+    """Request to sync data to ClickHouse from SQLite."""
+
+    interval: str = Field(
+        "1d", description="Rollup interval to sync (1m, 1h, 1d)"
+    )
+    wallet_address: str | None = Field(
+        None, description="Optional wallet to sync (None = all)"
+    )
+    sync_positions: bool = Field(
+        True, description="Whether to sync positions"
+    )
+    sync_rollups: bool = Field(
+        True, description="Whether to sync rollups"
+    )
+
+
+class ClickHouseSyncResult(BaseModel):
+    """Result of syncing data to ClickHouse."""
+
+    success: bool = Field(..., description="Whether sync completed successfully")
+    rollups_synced: int = Field(0, description="Number of rollup rows synced")
+    positions_synced: int = Field(0, description="Number of positions synced")
+    interval: str = Field(..., description="Interval that was synced")
+    wallet_address: str | None = Field(None, description="Wallet synced (or None for all)")
+    error_message: str | None = Field(None, description="Error message if failed")
+
+
+class ClickHouseQueryRequest(BaseModel):
+    """Request to query ClickHouse rollups."""
+
+    wallet_address: str = Field(..., description="Wallet address to query")
+    interval: str = Field("1d", description="Rollup interval (1m, 1h, 1d)")
+    start_time: datetime | None = Field(None, description="Start of time range")
+    end_time: datetime | None = Field(None, description="End of time range")
+    limit: int = Field(100, ge=1, le=1000, description="Maximum rows to return")
+
+
+class ClickHouseInitResult(BaseModel):
+    """Result of initializing ClickHouse tables."""
+
+    success: bool = Field(..., description="Whether initialization succeeded")
+    tables_created: list[str] = Field(
+        default_factory=list, description="Tables that were created"
+    )
+    error_message: str | None = Field(None, description="Error message if failed")
