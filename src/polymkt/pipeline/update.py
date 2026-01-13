@@ -886,6 +886,116 @@ def _generate_trade_alerts(
     return alerts_created
 
 
+def _track_positions_for_watchlisted_wallets(
+    trades_table: pa.Table,
+    metadata_store: MetadataStore,
+    run_logger: Any,
+) -> int:
+    """
+    Track positions for trades from watchlisted wallets.
+
+    Processes trades and updates position tracking with average-cost accounting.
+    Only tracks trades where the maker or taker is in a watchlist.
+
+    Args:
+        trades_table: PyArrow table of newly written trades
+        metadata_store: MetadataStore instance
+        run_logger: Structured logger with run_id context
+
+    Returns:
+        Number of positions updated
+    """
+    from polymkt.services.positions import PositionTracker
+
+    if trades_table.num_rows == 0:
+        return 0
+
+    # Get all watchlists and their wallets
+    watchlists = metadata_store.list_watchlists()
+    if not watchlists:
+        return 0
+
+    # Build set of all watched addresses
+    watched_addresses: set[str] = set()
+    for watchlist in watchlists:
+        items = metadata_store.list_watchlist_items(watchlist.id)
+        for item in items:
+            watched_addresses.add(item.wallet_address.lower())
+
+    if not watched_addresses:
+        return 0
+
+    tracker = PositionTracker(metadata_store)
+    positions_updated = 0
+
+    # Extract trade data
+    maker_col = trades_table.column("maker").to_pylist()
+    taker_col = trades_table.column("taker").to_pylist()
+    tx_hash_col = trades_table.column("transaction_hash").to_pylist()
+    market_id_col = trades_table.column("market_id").to_pylist()
+    timestamp_col = trades_table.column("timestamp").to_pylist()
+    side_col = trades_table.column("side").to_pylist()
+    size_col = trades_table.column("size").to_pylist()
+    price_col = trades_table.column("price").to_pylist()
+
+    for i in range(trades_table.num_rows):
+        maker = maker_col[i].lower() if maker_col[i] else ""
+        taker = taker_col[i].lower() if taker_col[i] else ""
+        tx_hash = tx_hash_col[i]
+        market_id = market_id_col[i]
+        timestamp = timestamp_col[i]
+        side = side_col[i]  # 'buy' or 'sell'
+        size = float(size_col[i]) if size_col[i] else 0.0
+        price = float(price_col[i]) if price_col[i] else 0.0
+
+        # Skip if no size or price
+        if size <= 0 or price <= 0:
+            continue
+
+        # Determine outcome from side (YES or NO)
+        # In Polymarket, 'buy' typically means buying YES tokens
+        outcome = "YES" if side and side.lower() == "buy" else "NO"
+
+        # Track for maker if watched
+        if maker in watched_addresses:
+            # Maker is selling (opposite of trade side)
+            is_buy = side and side.lower() == "sell"
+            result = tracker.process_trade(
+                wallet_address=maker,
+                market_id=market_id,
+                outcome=outcome,
+                is_buy=is_buy,
+                quantity=size,
+                price=price,
+                timestamp=timestamp,
+                transaction_hash=f"{tx_hash}_maker",
+            )
+            if result is not None:
+                positions_updated += 1
+
+        # Track for taker if watched
+        if taker in watched_addresses:
+            # Taker is buying (same as trade side)
+            is_buy = side and side.lower() == "buy"
+            result = tracker.process_trade(
+                wallet_address=taker,
+                market_id=market_id,
+                outcome=outcome,
+                is_buy=is_buy,
+                quantity=size,
+                price=price,
+                timestamp=timestamp,
+                transaction_hash=f"{tx_hash}_taker",
+            )
+            if result is not None:
+                positions_updated += 1
+
+    if positions_updated > 0:
+        run_logger.info("positions_updated", count=positions_updated)
+
+    return positions_updated
+
+
 def run_update(
     markets_csv: Path | None = None,
     trades_csv: Path | None = None,
@@ -1022,6 +1132,11 @@ def run_update(
 
             # Generate alerts for watchlisted wallet trades
             _generate_trade_alerts(trades_table, metadata_store, run_logger)
+
+            # Track positions for watchlisted wallets
+            _track_positions_for_watchlisted_wallets(
+                trades_table, metadata_store, run_logger
+            )
 
         else:
             run_logger.warning("csv_not_found", entity="trades", path=str(trades_csv))

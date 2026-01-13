@@ -19,6 +19,10 @@ from polymkt.models.schemas import (
     ModeStateSchema,
     IngestMode,
     AnalyticsMode,
+    PositionSchema,
+    MTMSnapshotSchema,
+    ClosedPositionSchema,
+    WalletMetricsSchema,
 )
 
 logger = structlog.get_logger()
@@ -167,6 +171,96 @@ class MetadataStore:
                 (mode_name, mode_value, transitioned_at, transitioned_by, updated_at)
                 VALUES (?, ?, ?, ?, ?)
             """, ("analytics_mode", AnalyticsMode.OFF.value, now, "system", now))
+
+            # Position tracking tables for wallet P&L
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS positions (
+                    id TEXT PRIMARY KEY,
+                    wallet_address TEXT NOT NULL,
+                    market_id TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    current_size REAL NOT NULL,
+                    total_cost_basis REAL NOT NULL,
+                    average_cost REAL,
+                    realized_pnl REAL DEFAULT 0.0,
+                    last_trade_price REAL,
+                    last_price_timestamp TEXT,
+                    mtm_pnl REAL,
+                    mtm_window_start TEXT,
+                    first_trade_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE (wallet_address, market_id, outcome)
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_positions_wallet
+                ON positions(wallet_address)
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_positions_market
+                ON positions(market_id)
+            """)
+
+            # MTM snapshots for historical P&L tracking
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS mtm_snapshots (
+                    id TEXT PRIMARY KEY,
+                    position_id TEXT NOT NULL,
+                    wallet_address TEXT NOT NULL,
+                    market_id TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    window_start TEXT NOT NULL,
+                    position_size REAL NOT NULL,
+                    last_trade_price REAL,
+                    mtm_pnl REAL,
+                    average_cost REAL,
+                    created_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_mtm_snapshots_position_window
+                ON mtm_snapshots(position_id, window_start DESC)
+            """)
+
+            # Closed positions for realized P&L tracking
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS closed_positions (
+                    id TEXT PRIMARY KEY,
+                    wallet_address TEXT NOT NULL,
+                    market_id TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    realized_pnl REAL NOT NULL,
+                    average_cost REAL NOT NULL,
+                    exit_price REAL NOT NULL,
+                    first_trade_at TEXT NOT NULL,
+                    closed_at TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_closed_positions_wallet
+                ON closed_positions(wallet_address, closed_at DESC)
+            """)
+
+            # Position trade log for tracking individual trades
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS position_trades (
+                    id TEXT PRIMARY KEY,
+                    position_id TEXT NOT NULL,
+                    wallet_address TEXT NOT NULL,
+                    market_id TEXT NOT NULL,
+                    outcome TEXT NOT NULL,
+                    is_buy INTEGER NOT NULL,
+                    quantity REAL NOT NULL,
+                    price REAL NOT NULL,
+                    usd_amount REAL NOT NULL,
+                    transaction_hash TEXT NOT NULL UNIQUE,
+                    timestamp TEXT NOT NULL
+                )
+            """)
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_position_trades_position
+                ON position_trades(position_id, timestamp DESC)
+            """)
 
             conn.commit()
         finally:
@@ -1254,4 +1348,512 @@ class MetadataStore:
                 else None
             ),
             updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    # =========================================================================
+    # Position tracking methods for wallet P&L
+    # =========================================================================
+
+    def _generate_position_id(
+        self, wallet_address: str, market_id: str, outcome: str
+    ) -> str:
+        """Generate a deterministic position ID from wallet/market/outcome."""
+        import hashlib
+
+        key = f"{wallet_address.lower()}:{market_id}:{outcome.upper()}"
+        return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+    def get_position(
+        self, wallet_address: str, market_id: str, outcome: str
+    ) -> PositionSchema | None:
+        """Get a position by wallet, market, and outcome."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute(
+                """
+                SELECT * FROM positions
+                WHERE wallet_address = ? AND market_id = ? AND outcome = ?
+                """,
+                (wallet_address.lower(), market_id, outcome.upper()),
+            )
+            row = cursor.fetchone()
+            if row:
+                return self._row_to_position(row)
+            return None
+        finally:
+            conn.close()
+
+    def get_position_by_id(self, position_id: str) -> PositionSchema | None:
+        """Get a position by its ID."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute(
+                "SELECT * FROM positions WHERE id = ?", (position_id,)
+            )
+            row = cursor.fetchone()
+            if row:
+                return self._row_to_position(row)
+            return None
+        finally:
+            conn.close()
+
+    def list_positions_by_wallet(self, wallet_address: str) -> list[PositionSchema]:
+        """List all open positions for a wallet."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute(
+                """
+                SELECT * FROM positions
+                WHERE wallet_address = ?
+                ORDER BY updated_at DESC
+                """,
+                (wallet_address.lower(),),
+            )
+            return [self._row_to_position(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def list_positions_by_market(self, market_id: str) -> list[PositionSchema]:
+        """List all open positions for a market."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute(
+                """
+                SELECT * FROM positions
+                WHERE market_id = ?
+                ORDER BY updated_at DESC
+                """,
+                (market_id,),
+            )
+            return [self._row_to_position(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def list_all_positions(self, limit: int = 1000) -> list[PositionSchema]:
+        """List all open positions (for MTM processing)."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute(
+                """
+                SELECT * FROM positions
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            return [self._row_to_position(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def upsert_position(self, position: PositionSchema) -> None:
+        """Insert or update a position."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO positions (
+                    id, wallet_address, market_id, outcome, current_size,
+                    total_cost_basis, average_cost, realized_pnl,
+                    last_trade_price, last_price_timestamp, mtm_pnl,
+                    mtm_window_start, first_trade_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(wallet_address, market_id, outcome) DO UPDATE SET
+                    current_size = excluded.current_size,
+                    total_cost_basis = excluded.total_cost_basis,
+                    average_cost = excluded.average_cost,
+                    realized_pnl = excluded.realized_pnl,
+                    last_trade_price = excluded.last_trade_price,
+                    last_price_timestamp = excluded.last_price_timestamp,
+                    mtm_pnl = excluded.mtm_pnl,
+                    mtm_window_start = excluded.mtm_window_start,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    position.id,
+                    position.wallet_address.lower(),
+                    position.market_id,
+                    position.outcome.upper(),
+                    position.current_size,
+                    position.total_cost_basis,
+                    position.average_cost,
+                    position.realized_pnl,
+                    position.last_trade_price,
+                    position.last_price_timestamp.isoformat()
+                    if position.last_price_timestamp
+                    else None,
+                    position.mtm_pnl,
+                    position.mtm_window_start.isoformat()
+                    if position.mtm_window_start
+                    else None,
+                    position.first_trade_at.isoformat(),
+                    position.updated_at.isoformat(),
+                ),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def delete_position(
+        self, wallet_address: str, market_id: str, outcome: str
+    ) -> bool:
+        """Delete a position (used when position is fully closed)."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.execute(
+                """
+                DELETE FROM positions
+                WHERE wallet_address = ? AND market_id = ? AND outcome = ?
+                """,
+                (wallet_address.lower(), market_id, outcome.upper()),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
+        finally:
+            conn.close()
+
+    def record_closed_position(
+        self,
+        wallet_address: str,
+        market_id: str,
+        outcome: str,
+        realized_pnl: float,
+        average_cost: float,
+        exit_price: float,
+        first_trade_at: datetime,
+        closed_at: datetime,
+    ) -> ClosedPositionSchema:
+        """Record a closed position for win/loss tracking."""
+        closed_id = str(uuid.uuid4())
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO closed_positions (
+                    id, wallet_address, market_id, outcome, realized_pnl,
+                    average_cost, exit_price, first_trade_at, closed_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    closed_id,
+                    wallet_address.lower(),
+                    market_id,
+                    outcome.upper(),
+                    realized_pnl,
+                    average_cost,
+                    exit_price,
+                    first_trade_at.isoformat(),
+                    closed_at.isoformat(),
+                ),
+            )
+            conn.commit()
+
+            return ClosedPositionSchema(
+                id=closed_id,
+                wallet_address=wallet_address.lower(),
+                market_id=market_id,
+                outcome=outcome.upper(),
+                realized_pnl=realized_pnl,
+                average_cost=average_cost,
+                exit_price=exit_price,
+                first_trade_at=first_trade_at,
+                closed_at=closed_at,
+            )
+        finally:
+            conn.close()
+
+    def list_closed_positions(
+        self, wallet_address: str, limit: int = 100
+    ) -> list[ClosedPositionSchema]:
+        """List closed positions for a wallet."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            cursor = conn.execute(
+                """
+                SELECT * FROM closed_positions
+                WHERE wallet_address = ?
+                ORDER BY closed_at DESC
+                LIMIT ?
+                """,
+                (wallet_address.lower(), limit),
+            )
+            return [self._row_to_closed_position(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def record_mtm_snapshot(
+        self,
+        position: PositionSchema,
+        window_start: datetime,
+    ) -> MTMSnapshotSchema:
+        """Record a mark-to-market snapshot for a position."""
+        snapshot_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc)
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO mtm_snapshots (
+                    id, position_id, wallet_address, market_id, outcome,
+                    window_start, position_size, last_trade_price, mtm_pnl,
+                    average_cost, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot_id,
+                    position.id,
+                    position.wallet_address,
+                    position.market_id,
+                    position.outcome,
+                    window_start.isoformat(),
+                    position.current_size,
+                    position.last_trade_price,
+                    position.mtm_pnl,
+                    position.average_cost,
+                    now.isoformat(),
+                ),
+            )
+            conn.commit()
+
+            return MTMSnapshotSchema(
+                id=snapshot_id,
+                position_id=position.id,
+                wallet_address=position.wallet_address,
+                market_id=position.market_id,
+                outcome=position.outcome,
+                window_start=window_start,
+                position_size=position.current_size,
+                last_trade_price=position.last_trade_price,
+                mtm_pnl=position.mtm_pnl,
+                average_cost=position.average_cost,
+                created_at=now,
+            )
+        finally:
+            conn.close()
+
+    def get_mtm_snapshots(
+        self,
+        position_id: str,
+        start_time: datetime | None = None,
+        end_time: datetime | None = None,
+        limit: int = 100,
+    ) -> list[MTMSnapshotSchema]:
+        """Get MTM snapshots for a position within a time range."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            query = "SELECT * FROM mtm_snapshots WHERE position_id = ?"
+            params: list[Any] = [position_id]
+
+            if start_time:
+                query += " AND window_start >= ?"
+                params.append(start_time.isoformat())
+            if end_time:
+                query += " AND window_start <= ?"
+                params.append(end_time.isoformat())
+
+            query += " ORDER BY window_start DESC LIMIT ?"
+            params.append(limit)
+
+            cursor = conn.execute(query, params)
+            return [self._row_to_mtm_snapshot(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+
+    def record_position_trade(
+        self,
+        position_id: str,
+        wallet_address: str,
+        market_id: str,
+        outcome: str,
+        is_buy: bool,
+        quantity: float,
+        price: float,
+        usd_amount: float,
+        transaction_hash: str,
+        timestamp: datetime,
+    ) -> bool:
+        """Record a trade that affects a position. Returns False if already exists."""
+        trade_id = str(uuid.uuid4())
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                INSERT INTO position_trades (
+                    id, position_id, wallet_address, market_id, outcome,
+                    is_buy, quantity, price, usd_amount, transaction_hash, timestamp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    trade_id,
+                    position_id,
+                    wallet_address.lower(),
+                    market_id,
+                    outcome.upper(),
+                    1 if is_buy else 0,
+                    quantity,
+                    price,
+                    usd_amount,
+                    transaction_hash,
+                    timestamp.isoformat(),
+                ),
+            )
+            conn.commit()
+            return True
+        except sqlite3.IntegrityError:
+            # Trade already recorded (duplicate transaction_hash)
+            return False
+        finally:
+            conn.close()
+
+    def position_trade_exists(self, transaction_hash: str) -> bool:
+        """Check if a trade has already been recorded for position tracking."""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            cursor = conn.execute(
+                "SELECT 1 FROM position_trades WHERE transaction_hash = ?",
+                (transaction_hash,),
+            )
+            return cursor.fetchone() is not None
+        finally:
+            conn.close()
+
+    def get_wallet_metrics(self, wallet_address: str) -> WalletMetricsSchema:
+        """
+        Compute wallet metrics including win percentage.
+
+        Win percentage excludes closed positions with zero P&L per PRD requirement.
+        """
+        wallet = wallet_address.lower()
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            # Get closed position stats
+            cursor = conn.execute(
+                """
+                SELECT
+                    COUNT(*) as total_closed,
+                    SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END) as wins,
+                    SUM(CASE WHEN realized_pnl < 0 THEN 1 ELSE 0 END) as losses,
+                    SUM(realized_pnl) as total_realized_pnl
+                FROM closed_positions
+                WHERE wallet_address = ?
+                """,
+                (wallet,),
+            )
+            closed_row = cursor.fetchone()
+
+            total_closed = closed_row["total_closed"] or 0
+            win_count = closed_row["wins"] or 0
+            loss_count = closed_row["losses"] or 0
+            total_realized_pnl = closed_row["total_realized_pnl"] or 0.0
+
+            # Win percentage excludes zero P&L positions
+            non_zero_count = win_count + loss_count
+            win_percentage = (
+                (win_count / non_zero_count) if non_zero_count > 0 else None
+            )
+
+            # Get open position stats
+            cursor = conn.execute(
+                """
+                SELECT
+                    COUNT(*) as open_count,
+                    SUM(COALESCE(mtm_pnl, 0)) as total_mtm_pnl
+                FROM positions
+                WHERE wallet_address = ?
+                """,
+                (wallet,),
+            )
+            open_row = cursor.fetchone()
+
+            open_count = open_row["open_count"] or 0
+            total_mtm_pnl = open_row["total_mtm_pnl"]
+
+            # Get total volume from position trades
+            cursor = conn.execute(
+                """
+                SELECT SUM(usd_amount) as total_volume
+                FROM position_trades
+                WHERE wallet_address = ?
+                """,
+                (wallet,),
+            )
+            volume_row = cursor.fetchone()
+            total_volume = volume_row["total_volume"] or 0.0
+
+            return WalletMetricsSchema(
+                wallet_address=wallet,
+                win_count=win_count,
+                loss_count=loss_count,
+                win_percentage=win_percentage,
+                total_realized_pnl=total_realized_pnl,
+                total_unrealized_pnl=total_mtm_pnl,
+                open_positions_count=open_count,
+                closed_positions_count=total_closed,
+                total_volume_usd=total_volume,
+            )
+        finally:
+            conn.close()
+
+    def _row_to_position(self, row: sqlite3.Row) -> PositionSchema:
+        """Convert a database row to a PositionSchema."""
+        return PositionSchema(
+            id=row["id"],
+            wallet_address=row["wallet_address"],
+            market_id=row["market_id"],
+            outcome=row["outcome"],
+            current_size=row["current_size"],
+            total_cost_basis=row["total_cost_basis"],
+            average_cost=row["average_cost"],
+            realized_pnl=row["realized_pnl"] or 0.0,
+            last_trade_price=row["last_trade_price"],
+            last_price_timestamp=(
+                datetime.fromisoformat(row["last_price_timestamp"])
+                if row["last_price_timestamp"]
+                else None
+            ),
+            mtm_pnl=row["mtm_pnl"],
+            mtm_window_start=(
+                datetime.fromisoformat(row["mtm_window_start"])
+                if row["mtm_window_start"]
+                else None
+            ),
+            first_trade_at=datetime.fromisoformat(row["first_trade_at"]),
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def _row_to_closed_position(self, row: sqlite3.Row) -> ClosedPositionSchema:
+        """Convert a database row to a ClosedPositionSchema."""
+        return ClosedPositionSchema(
+            id=row["id"],
+            wallet_address=row["wallet_address"],
+            market_id=row["market_id"],
+            outcome=row["outcome"],
+            realized_pnl=row["realized_pnl"],
+            average_cost=row["average_cost"],
+            exit_price=row["exit_price"],
+            first_trade_at=datetime.fromisoformat(row["first_trade_at"]),
+            closed_at=datetime.fromisoformat(row["closed_at"]),
+        )
+
+    def _row_to_mtm_snapshot(self, row: sqlite3.Row) -> MTMSnapshotSchema:
+        """Convert a database row to an MTMSnapshotSchema."""
+        return MTMSnapshotSchema(
+            id=row["id"],
+            position_id=row["position_id"],
+            wallet_address=row["wallet_address"],
+            market_id=row["market_id"],
+            outcome=row["outcome"],
+            window_start=datetime.fromisoformat(row["window_start"]),
+            position_size=row["position_size"],
+            last_trade_price=row["last_trade_price"],
+            mtm_pnl=row["mtm_pnl"],
+            average_cost=row["average_cost"],
+            created_at=datetime.fromisoformat(row["created_at"]),
         )

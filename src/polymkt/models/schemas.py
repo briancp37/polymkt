@@ -1209,3 +1209,122 @@ class RuntimeStatusSchema(BaseModel):
 
     ingest_mode: ModeStateSchema = Field(..., description="Ingestion mode state")
     analytics_mode: ModeStateSchema = Field(..., description="Analytics mode state")
+
+
+# =============================================================================
+# Wallet Position Tracking Schemas
+# =============================================================================
+
+
+class PositionSchema(BaseModel):
+    """A wallet's position in a specific market and outcome."""
+
+    id: str = Field(..., description="Position ID (wallet_market_outcome hash)")
+    wallet_address: str = Field(..., description="Wallet address (lowercase)")
+    market_id: str = Field(..., description="Market ID")
+    outcome: str = Field(..., description="Outcome token (YES or NO)")
+    current_size: float = Field(..., description="Current position size in tokens")
+    total_cost_basis: float = Field(
+        ..., description="Total USD spent to build position"
+    )
+    average_cost: float | None = Field(
+        None, description="Average cost per token (cost_basis / size)"
+    )
+    realized_pnl: float = Field(0.0, description="Realized P&L from closed portions")
+    last_trade_price: float | None = Field(
+        None, description="Last trade price for this outcome"
+    )
+    last_price_timestamp: datetime | None = Field(
+        None, description="When last_trade_price was observed"
+    )
+    mtm_pnl: float | None = Field(
+        None, description="Mark-to-market unrealized P&L"
+    )
+    mtm_window_start: datetime | None = Field(
+        None, description="Start of current 5-minute MTM window"
+    )
+    first_trade_at: datetime = Field(..., description="When position was first opened")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+
+
+class PositionUpdateEvent(BaseModel):
+    """Event representing a trade that updates a position."""
+
+    wallet_address: str = Field(..., description="Wallet address")
+    market_id: str = Field(..., description="Market ID")
+    outcome: str = Field(..., description="Outcome token (YES or NO)")
+    is_buy: bool = Field(..., description="True if buying tokens, False if selling")
+    quantity: float = Field(..., description="Token quantity traded")
+    price: float = Field(..., description="Price per token (0-1)")
+    timestamp: datetime = Field(..., description="Trade timestamp")
+    transaction_hash: str = Field(..., description="Transaction hash for dedup")
+
+
+class MTMSnapshotSchema(BaseModel):
+    """A mark-to-market snapshot for a position at a 5-minute boundary."""
+
+    id: str = Field(..., description="Snapshot ID")
+    position_id: str = Field(..., description="Position being snapshotted")
+    wallet_address: str = Field(..., description="Wallet address")
+    market_id: str = Field(..., description="Market ID")
+    outcome: str = Field(..., description="Outcome token")
+    window_start: datetime = Field(..., description="5-minute window start")
+    position_size: float = Field(..., description="Position size at snapshot")
+    last_trade_price: float | None = Field(
+        None, description="Last trade price in window (or carried forward)"
+    )
+    mtm_pnl: float | None = Field(None, description="MTM P&L at snapshot")
+    average_cost: float | None = Field(None, description="Average cost at snapshot")
+    created_at: datetime = Field(..., description="Snapshot creation time")
+
+
+class ClosedPositionSchema(BaseModel):
+    """A record of a position that was fully closed (size returned to zero)."""
+
+    id: str = Field(..., description="Closed position record ID")
+    wallet_address: str = Field(..., description="Wallet address")
+    market_id: str = Field(..., description="Market ID")
+    outcome: str = Field(..., description="Outcome token")
+    realized_pnl: float = Field(..., description="Total realized P&L")
+    average_cost: float = Field(..., description="Average entry cost")
+    exit_price: float = Field(..., description="Price at which position closed")
+    first_trade_at: datetime = Field(..., description="When position opened")
+    closed_at: datetime = Field(..., description="When position closed")
+
+
+class WalletMetricsSchema(BaseModel):
+    """Aggregated metrics for a wallet's trading performance."""
+
+    wallet_address: str = Field(..., description="Wallet address")
+    win_count: int = Field(0, description="Number of winning closed positions")
+    loss_count: int = Field(0, description="Number of losing closed positions")
+    win_percentage: float | None = Field(
+        None, description="Win rate (excluding zero P&L positions)"
+    )
+    total_realized_pnl: float = Field(0.0, description="Sum of realized P&L")
+    total_unrealized_pnl: float | None = Field(
+        None, description="Sum of MTM P&L for open positions"
+    )
+    open_positions_count: int = Field(0, description="Number of open positions")
+    closed_positions_count: int = Field(0, description="Number of closed positions")
+    total_volume_usd: float = Field(0.0, description="Total notional traded")
+
+
+class PositionListResponse(BaseModel):
+    """Response for listing positions."""
+
+    positions: list[PositionSchema] = Field(..., description="List of positions")
+    count: int = Field(..., description="Number of positions returned")
+
+
+class MTMProcessingResult(BaseModel):
+    """Result of processing a 5-minute MTM window."""
+
+    window_start: datetime = Field(..., description="Window start time")
+    window_end: datetime = Field(..., description="Window end time")
+    positions_updated: int = Field(0, description="Positions with price updates")
+    positions_carried_forward: int = Field(
+        0, description="Positions with carried-forward prices"
+    )
+    snapshots_created: int = Field(0, description="MTM snapshots created")
+    processing_time_ms: float = Field(0.0, description="Processing time in ms")

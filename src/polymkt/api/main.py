@@ -82,6 +82,12 @@ from polymkt.models.schemas import (
     ModeTransitionRequest,
     ModeTransitionResponse,
     RuntimeStatusSchema,
+    # Position tracking schemas
+    PositionSchema,
+    PositionListResponse,
+    ClosedPositionSchema,
+    WalletMetricsSchema,
+    MTMProcessingResult,
 )
 from polymkt.pipeline.bootstrap import run_bootstrap
 from polymkt.pipeline.curate import run_curate
@@ -3468,3 +3474,211 @@ def set_analytics_mode_endpoint(
         transitioned_at=datetime.now(timezone.utc),
         message=message,
     )
+
+
+# =============================================================================
+# Ingestion Service Endpoints
+# =============================================================================
+
+
+@app.get(
+    "/api/ingestion/status",
+    tags=["Ingestion"],
+)
+def get_ingestion_status() -> dict[str, Any]:
+    """Get the current status of the ingestion service."""
+    from polymkt.services.ingestion import get_ingestion_service
+
+    service = get_ingestion_service()
+    return service.stats
+
+
+@app.post(
+    "/api/ingestion/start",
+    tags=["Ingestion"],
+)
+def start_ingestion() -> dict[str, Any]:
+    """
+    Start the ingestion service.
+
+    The service will run based on the current INGEST_MODE:
+    - batched: Updates every 5 minutes
+    - live: Updates every 15 seconds
+
+    Will fail if INGEST_MODE is off.
+    """
+    from polymkt.services.ingestion import get_ingestion_service
+
+    service = get_ingestion_service()
+    success, message = service.start()
+
+    if not success:
+        raise HTTPException(status_code=409, detail=message)
+
+    return {"success": True, "message": message, "stats": service.stats}
+
+
+@app.post(
+    "/api/ingestion/stop",
+    tags=["Ingestion"],
+)
+def stop_ingestion() -> dict[str, Any]:
+    """Stop the ingestion service gracefully."""
+    from polymkt.services.ingestion import get_ingestion_service
+
+    service = get_ingestion_service()
+    success, message = service.stop()
+
+    if not success:
+        raise HTTPException(status_code=409, detail=message)
+
+    return {"success": True, "message": message, "stats": service.stats}
+
+
+@app.post(
+    "/api/ingestion/run-once",
+    tags=["Ingestion"],
+)
+def run_ingestion_once() -> dict[str, Any]:
+    """
+    Execute a single ingestion run manually.
+
+    This is the manual backfill entry point that works regardless of INGEST_MODE.
+    Use this when INGEST_MODE is off but you want to run a one-time update.
+    """
+    from polymkt.services.ingestion import get_ingestion_service
+
+    service = get_ingestion_service()
+    result = service.run_once()
+
+    return {
+        "success": True,
+        "message": "Manual ingestion run completed",
+        "result": {
+            "rows_read": result.rows_read,
+            "rows_written": result.rows_written,
+            "rows_skipped": result.rows_skipped,
+            "duration_seconds": result.duration_seconds,
+        },
+        "stats": service.stats,
+    }
+
+
+# =============================================================================
+# Position Tracking Endpoints
+# =============================================================================
+
+
+@app.get(
+    "/api/wallets/{wallet_address}/positions",
+    response_model=PositionListResponse,
+    tags=["Positions"],
+)
+def get_wallet_positions(wallet_address: str) -> PositionListResponse:
+    """
+    Get all open positions for a wallet.
+
+    Returns positions with current size, average cost, and mark-to-market P&L.
+    """
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    positions = metadata_store.list_positions_by_wallet(wallet_address)
+
+    return PositionListResponse(
+        positions=positions,
+        count=len(positions),
+    )
+
+
+@app.get(
+    "/api/wallets/{wallet_address}/metrics",
+    response_model=WalletMetricsSchema,
+    tags=["Positions"],
+)
+def get_wallet_metrics(wallet_address: str) -> WalletMetricsSchema:
+    """
+    Get aggregated trading metrics for a wallet.
+
+    Includes win percentage (excluding zero P&L positions per PRD requirement),
+    total realized P&L, unrealized MTM P&L, and position counts.
+    """
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    return metadata_store.get_wallet_metrics(wallet_address)
+
+
+@app.get(
+    "/api/wallets/{wallet_address}/closed-positions",
+    response_model=list[ClosedPositionSchema],
+    tags=["Positions"],
+)
+def get_wallet_closed_positions(
+    wallet_address: str, limit: int = 100
+) -> list[ClosedPositionSchema]:
+    """
+    Get closed positions for a wallet.
+
+    Returns positions that have been fully closed (size returned to zero)
+    with their realized P&L.
+    """
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    return metadata_store.list_closed_positions(wallet_address, limit)
+
+
+@app.get(
+    "/api/markets/{market_id}/positions",
+    response_model=PositionListResponse,
+    tags=["Positions"],
+)
+def get_market_positions(market_id: str) -> PositionListResponse:
+    """
+    Get all open positions for a market.
+
+    Returns all wallets that have open positions in this market.
+    """
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    positions = metadata_store.list_positions_by_market(market_id)
+
+    return PositionListResponse(
+        positions=positions,
+        count=len(positions),
+    )
+
+
+@app.get(
+    "/api/positions/{wallet_address}/{market_id}/{outcome}",
+    response_model=PositionSchema | None,
+    tags=["Positions"],
+)
+def get_position(
+    wallet_address: str, market_id: str, outcome: str
+) -> PositionSchema | None:
+    """
+    Get a specific position by wallet, market, and outcome.
+
+    Outcome must be either 'YES' or 'NO'.
+    Returns null if no position exists.
+    """
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    return metadata_store.get_position(wallet_address, market_id, outcome)
+
+
+@app.post(
+    "/api/positions/process-mtm",
+    response_model=MTMProcessingResult,
+    tags=["Positions"],
+)
+def process_mtm_window() -> MTMProcessingResult:
+    """
+    Manually trigger mark-to-market processing for the current 5-minute window.
+
+    This is normally run automatically during ingestion, but can be triggered
+    manually for testing or catch-up processing.
+    """
+    from polymkt.services.positions import MTMProcessor, get_5min_window_boundaries
+
+    metadata_store = MetadataStore(settings.metadata_db_path)
+    processor = MTMProcessor(metadata_store)
+
+    now = datetime.now(timezone.utc)
+    window_start, window_end = get_5min_window_boundaries(now)
+
+    return processor.process_window(window_start, window_end)

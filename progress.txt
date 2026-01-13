@@ -3593,3 +3593,90 @@ Completed the alerting system with per-rule cooldown windows to prevent spam and
 - Polymarket ingestion supports live, batched, and dormant operation (INGEST_MODE implementation)
 - Wallet tracking with average-cost accounting
 - Bootstrap cloud data lake (S3/Parquet)
+
+
+---
+
+## 2026-01-13: Wallet Tracking with Average-Cost Accounting and 5-Minute Mark-to-Market
+
+### What was done:
+Implemented wallet position tracking with average-cost accounting and 5-minute mark-to-market P&L calculations per PRD requirements.
+
+### Features implemented:
+
+1. **Position Tracking with Average-Cost Accounting** (`src/polymkt/services/positions.py`)
+   - `PositionTracker` class maintains per-wallet per-market per-outcome positions
+   - Average cost calculated as: total_cost_basis / current_size
+   - Buys add to position at traded price
+   - Sells reduce position and realize P&L: (sale_price - avg_cost) * quantity_sold
+   - When position size returns to zero, position is closed and recorded
+
+2. **Mark-to-Market Processing** (`src/polymkt/services/positions.py`)
+   - `MTMProcessor` class processes 5-minute MTM windows
+   - Computes MTM P&L: (last_trade_price - avg_cost) * current_size
+   - Carries forward last known price if no trade in window
+   - MTM P&L is null until first trade price is observed
+   - Records MTM snapshots for historical tracking
+
+3. **Storage Layer** (`src/polymkt/storage/metadata.py:1353-1860`)
+   - `positions` table: per-wallet/market/outcome with average cost, size, MTM P&L
+   - `mtm_snapshots` table: 5-minute window snapshots for historical MTM
+   - `closed_positions` table: records of fully closed positions with realized P&L
+   - `position_trades` table: trade log for audit trail
+   - Win percentage calculation excludes zero P&L positions (per PRD)
+
+4. **API Endpoints** (`src/polymkt/api/main.py:3567-3684`)
+   - `GET /api/wallets/{address}/positions` - List open positions
+   - `GET /api/wallets/{address}/metrics` - Win %, realized/unrealized P&L
+   - `GET /api/wallets/{address}/closed-positions` - Closed position history
+   - `GET /api/markets/{market_id}/positions` - Positions by market
+   - `GET /api/positions/{wallet}/{market}/{outcome}` - Specific position
+   - `POST /api/positions/process-mtm` - Manual MTM trigger
+
+5. **Pipeline Integration** (`src/polymkt/pipeline/update.py:889-996`)
+   - `_track_positions_for_watchlisted_wallets()` processes trades during update
+   - Only tracks positions for wallets in watchlists
+   - Deduplicates trades by transaction_hash
+
+### PRD requirements met:
+- Maintain per-wallet per-market per-outcome positions with average cost ✓
+  - `PositionSchema` stores wallet_address, market_id, outcome, average_cost
+- Compute realized P&L on position size returning to zero ✓
+  - `PositionTracker.process_trade()` calculates and records realized P&L
+- Compute mark-to-market P&L every 5 minutes using last trade price in window ✓
+  - `MTMProcessor.process_window()` computes MTM P&L
+- Carry forward last known price if no trade in window; null until first print ✓
+  - `_carry_forward_price()` preserves last_trade_price
+- Ignore closed positions with zero P&L for win percentage calculations ✓
+  - `get_wallet_metrics()` excludes zero P&L in win_count/loss_count
+
+### Test results:
+- Backend tests: 660 passing
+- mypy typecheck: no errors
+
+### Files created:
+- `src/polymkt/services/positions.py` - PositionTracker and MTMProcessor (~350 lines)
+
+### Files modified:
+- `src/polymkt/models/schemas.py` - Added 7 position-related schemas (~120 lines)
+- `src/polymkt/storage/metadata.py` - Added position storage methods (~500 lines)
+- `src/polymkt/services/__init__.py` - Export new classes
+- `src/polymkt/api/main.py` - Added 6 position API endpoints (~120 lines)
+- `src/polymkt/pipeline/update.py` - Added position tracking in pipeline (~110 lines)
+
+### PRD feature marked as passing:
+- Wallet tracking with average-cost accounting and 5-minute mark-to-market
+
+### Notes for next person:
+- Positions are only tracked for wallets in watchlists (sharp money feature)
+- To track a new wallet, add it to a watchlist first
+- MTM processing happens automatically during ingestion (via pipeline)
+- Manual MTM trigger available at POST /api/positions/process-mtm
+- Win percentage excludes zero P&L positions per PRD requirement
+- Transaction hashes are suffixed with _maker or _taker for unique tracking
+
+### Next steps for future sessions:
+- Win percentage and volume metrics (builds on this foundation)
+- Bootstrap cloud data lake (S3/Parquet)
+- ClickHouse serving layer for rollups
+

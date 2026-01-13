@@ -40,7 +40,7 @@
             "All ingestion paths archive events to S3 Parquet within 5 minutes",
             "Watermarks advance monotonically and support resumable backfill"
         ],
-        "passes": false
+        "passes": true
     },
     {
         "category": "functional",
@@ -52,7 +52,7 @@
             "Carry forward last known price if no trade in window; null until first print",
             "Ignore closed positions with zero P&L for win percentage calculations"
         ],
-        "passes": false
+        "passes": true
     },
     {
         "category": "functional",
