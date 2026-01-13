@@ -90,6 +90,10 @@ from polymkt.models.schemas import (
     MTMProcessingResult,
     WalletMetricsRollupSchema,
     WalletMetricsRollupListResponse,
+    # Cloud data lake schemas
+    CloudBootstrapResult,
+    CloudBootstrapVerificationReport,
+    S3DataLakeStatus,
 )
 from polymkt.pipeline.bootstrap import run_bootstrap
 from polymkt.pipeline.curate import run_curate
@@ -3882,3 +3886,97 @@ def get_wallet_win_rate(
             for r in rollups
         ],
     }
+
+
+# =============================================================================
+# Cloud Data Lake Bootstrap Endpoints
+# =============================================================================
+
+
+@app.get(
+    "/api/data-lake/status",
+    response_model=S3DataLakeStatus,
+    tags=["Data Lake"],
+)
+def get_data_lake_status() -> S3DataLakeStatus:
+    """
+    Get the current status of the S3 data lake.
+
+    Returns information about:
+    - S3 bucket and prefix configuration
+    - Whether each dataset exists in S3
+    - Whether bootstrap is required
+    """
+    from polymkt.pipeline.cloud_bootstrap import get_s3_data_lake_status
+
+    return get_s3_data_lake_status()
+
+
+@app.post(
+    "/api/data-lake/bootstrap",
+    response_model=CloudBootstrapResult,
+    tags=["Data Lake"],
+)
+def run_cloud_data_lake_bootstrap(
+    upload_to_s3: bool = False,
+    verification_sample_size: int = 100,
+    fail_on_verification_error: bool = True,
+) -> CloudBootstrapResult:
+    """
+    Run cloud data lake bootstrap.
+
+    This is the main entry point for bootstrapping the cloud data lake:
+    1. Checks if S3 datasets already exist (skips if present)
+    2. Converts local CSVs to partitioned Parquet
+    3. Generates verification report comparing CSV vs Parquet
+    4. Uploads to S3 if enabled and verification passes
+    5. Blocks CSV deletion until verification passes
+
+    Args:
+        upload_to_s3: Whether to upload to S3 (requires S3_BUCKET config)
+        verification_sample_size: Number of rows to sample for verification
+        fail_on_verification_error: If True, fail if verification doesn't pass
+
+    Returns:
+        CloudBootstrapResult with status, verification report, and S3 uploads
+    """
+    from polymkt.pipeline.cloud_bootstrap import run_cloud_bootstrap
+
+    return run_cloud_bootstrap(
+        upload_to_s3=upload_to_s3,
+        verification_sample_size=verification_sample_size,
+        fail_on_verification_error=fail_on_verification_error,
+    )
+
+
+@app.post(
+    "/api/data-lake/verify",
+    response_model=CloudBootstrapVerificationReport,
+    tags=["Data Lake"],
+)
+def verify_data_lake(
+    sample_size: int = 100,
+) -> CloudBootstrapVerificationReport:
+    """
+    Verify existing Parquet data against source CSVs.
+
+    Generates a verification report comparing:
+    - Row counts between CSV and Parquet
+    - Random sample verification by key column
+    - Timestamp ranges and distinct market_id counts
+
+    Args:
+        sample_size: Number of rows to sample for verification
+
+    Returns:
+        CloudBootstrapVerificationReport with per-dataset stats
+    """
+    import uuid
+
+    from polymkt.pipeline.cloud_bootstrap import generate_verification_report
+
+    return generate_verification_report(
+        run_id=str(uuid.uuid4()),
+        parquet_dir=settings.parquet_dir,
+        sample_size=sample_size,
+    )

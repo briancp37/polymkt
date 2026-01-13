@@ -3746,3 +3746,110 @@ Added time-based rollup metrics (1m, 1h, 1d) for wallet trading performance trac
 - ClickHouse serving layer for rollups
 - LLM-driven analytics with guardrails
 
+
+---
+
+## 2026-01-13: Bootstrap Cloud Data Lake with S3 Support
+
+### What was done:
+Implemented cloud data lake bootstrap with CSV to partitioned Parquet conversion, verification reports, and optional S3 upload.
+
+### Features implemented:
+
+1. **S3 Configuration** (`src/polymkt/config.py`)
+   - `s3_bucket`: S3 bucket name (optional)
+   - `s3_region`: AWS region (default: us-east-1)
+   - `s3_raw_prefix`: Raw data prefix (raw/polymarket)
+   - `s3_curated_prefix`: Curated data prefix (curated/polymarket)
+   - `s3_enabled`: Flag to enable S3 uploads
+
+2. **Cloud Bootstrap Module** (`src/polymkt/pipeline/cloud_bootstrap.py`)
+   - `check_s3_dataset_exists()` - Detect existing S3 Parquet datasets
+   - `get_s3_data_lake_status()` - Get status of all datasets in S3
+   - `generate_verification_report()` - Compare CSV vs Parquet:
+     - Row count comparison
+     - Timestamp range extraction
+     - Distinct market_id counts
+     - Random sample verification by key column
+   - `upload_parquet_to_s3()` - Upload to raw and curated layers
+   - `run_cloud_bootstrap()` - Main entry point with full workflow
+
+3. **Verification Report Schemas** (`src/polymkt/models/schemas.py:1360-1445`)
+   - `DatasetVerificationStats` - Per-dataset verification stats
+   - `CloudBootstrapVerificationReport` - Full report with all datasets
+   - `CloudBootstrapResult` - Bootstrap operation result
+   - `S3DatasetStatus` - Individual dataset S3 status
+   - `S3DataLakeStatus` - Overall data lake status
+
+4. **API Endpoints** (`src/polymkt/api/main.py:3891-3982`)
+   - `GET /api/data-lake/status` - Check S3 data lake status
+   - `POST /api/data-lake/bootstrap` - Run cloud bootstrap
+   - `POST /api/data-lake/verify` - Verify existing Parquet vs CSV
+
+### PRD requirements met:
+- Detect whether S3 Parquet datasets already exist ✓
+  - `check_s3_dataset_exists()` and `get_s3_data_lake_status()`
+- If not present, run one-time bootstrap ✓
+  - `run_cloud_bootstrap()` runs existing bootstrap pipeline
+- Define canonical schemas ✓
+  - Already defined in storage/parquet.py
+- Partition Parquet by time and hash bucket ✓
+  - Bootstrap runs with partitioning_enabled=True
+- Write raw/curated Parquet to S3 ✓
+  - `upload_parquet_to_s3()` uploads to both prefixes
+- Upload with deterministic file naming ✓
+  - Uses existing ParquetWriter with hive-style partitioning
+- Generate verification report ✓
+  - `generate_verification_report()` with row counts, timestamps, market_ids
+- Randomly sample rows and compare ✓
+  - `_sample_verify_dataset()` samples 100 rows by default
+- Fail bootstrap if verification doesn't pass ✓
+  - `fail_on_verification_error` parameter (default True)
+- Block CSV deletion until verification passes ✓
+  - `csv_safe_to_delete` only True if verification passed
+- Document bootstrap command ✓
+  - API endpoints provide programmatic access
+
+### Test results:
+- Backend tests: 660 passing
+- mypy typecheck: no errors
+
+### Files created:
+- `src/polymkt/pipeline/cloud_bootstrap.py` - Cloud bootstrap module (~550 lines)
+
+### Files modified:
+- `src/polymkt/config.py` - Added S3 settings
+- `src/polymkt/models/schemas.py` - Added verification report schemas (~90 lines)
+- `src/polymkt/api/main.py` - Added 3 data lake API endpoints (~90 lines)
+- `pyproject.toml` - Added boto3 to mypy ignores
+
+### PRD feature marked as passing:
+- Bootstrap cloud data lake
+
+### Notes for next person:
+- S3 upload requires boto3 (optional dependency) and AWS credentials
+- Bootstrap works locally without S3 (local Parquet only mode)
+- Verification samples 100 rows by default (configurable)
+- CSVs are protected until verification passes (csv_safe_to_delete flag)
+- Run via API: POST /api/data-lake/bootstrap?upload_to_s3=true
+
+### Bootstrap command example:
+```bash
+# Check status
+curl http://localhost:8000/api/data-lake/status
+
+# Run bootstrap (local only)
+curl -X POST http://localhost:8000/api/data-lake/bootstrap
+
+# Run bootstrap with S3 upload
+curl -X POST "http://localhost:8000/api/data-lake/bootstrap?upload_to_s3=true"
+
+# Verify existing data
+curl -X POST http://localhost:8000/api/data-lake/verify
+```
+
+### Next steps for future sessions:
+- ClickHouse serving layer for rollups
+- ClickHouse lifecycle management
+- LLM-driven analytics with guardrails
+

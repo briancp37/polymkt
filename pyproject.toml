@@ -36,11 +36,11 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["pyarrow", "pyarrow.*", "duckdb", "duckdb.*", "openai", "openai.*"]
+module = ["pyarrow", "pyarrow.*", "duckdb", "duckdb.*", "openai", "openai.*", "boto3", "boto3.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["polymkt.storage.parquet", "polymkt.pipeline.bootstrap"]
+module = ["polymkt.storage.parquet", "polymkt.pipeline.bootstrap", "polymkt.pipeline.cloud_bootstrap"]
 disallow_untyped_calls = false
 disallow_any_expr = false
 

@@ -1355,3 +1355,91 @@ class MTMProcessingResult(BaseModel):
     )
     snapshots_created: int = Field(0, description="MTM snapshots created")
     processing_time_ms: float = Field(0.0, description="Processing time in ms")
+
+
+# =============================================================================
+# Cloud Data Lake Bootstrap Schemas
+# =============================================================================
+
+
+class DatasetVerificationStats(BaseModel):
+    """Verification statistics for a single dataset."""
+
+    dataset: str = Field(..., description="Dataset name (trades, events, markets)")
+    csv_row_count: int = Field(0, description="Rows in source CSV")
+    parquet_row_count: int = Field(0, description="Rows in Parquet output")
+    row_count_match: bool = Field(False, description="Whether row counts match")
+    min_timestamp: datetime | None = Field(None, description="Earliest timestamp")
+    max_timestamp: datetime | None = Field(None, description="Latest timestamp")
+    distinct_market_ids: int | None = Field(
+        None, description="Number of unique market IDs"
+    )
+    sample_size: int = Field(0, description="Number of rows sampled for verification")
+    sample_matches: int = Field(0, description="Samples that matched CSV")
+    sample_mismatches: int = Field(0, description="Samples that didn't match")
+    verification_passed: bool = Field(False, description="Overall verification status")
+
+
+class CloudBootstrapVerificationReport(BaseModel):
+    """Verification report for cloud data lake bootstrap."""
+
+    run_id: str = Field(..., description="Bootstrap run ID")
+    verification_time: datetime = Field(..., description="When verification was run")
+    datasets: list[DatasetVerificationStats] = Field(
+        default_factory=list, description="Per-dataset verification stats"
+    )
+    overall_passed: bool = Field(False, description="All verifications passed")
+    s3_bucket: str | None = Field(None, description="S3 bucket used")
+    s3_raw_prefix: str | None = Field(None, description="S3 raw data prefix")
+    s3_curated_prefix: str | None = Field(None, description="S3 curated data prefix")
+    local_parquet_dir: str = Field(..., description="Local Parquet directory")
+    csv_deletion_blocked: bool = Field(
+        True, description="CSV deletion blocked until verification passes"
+    )
+
+
+class CloudBootstrapResult(BaseModel):
+    """Result of cloud data lake bootstrap operation."""
+
+    run_id: str = Field(..., description="Bootstrap run ID")
+    status: str = Field(..., description="Status: completed, failed, verification_failed")
+    duration_seconds: float = Field(0.0, description="Total duration")
+    local_parquet_files: list[str] = Field(
+        default_factory=list, description="Local Parquet files created"
+    )
+    s3_uploads: list[str] = Field(
+        default_factory=list, description="S3 keys uploaded (if S3 enabled)"
+    )
+    verification_report: CloudBootstrapVerificationReport | None = Field(
+        None, description="Verification report"
+    )
+    csv_safe_to_delete: bool = Field(
+        False, description="True if verification passed and CSVs can be deleted"
+    )
+    error_message: str | None = Field(None, description="Error message if failed")
+
+
+class S3DatasetStatus(BaseModel):
+    """Status of a dataset in S3."""
+
+    dataset: str = Field(..., description="Dataset name")
+    exists_in_s3: bool = Field(False, description="Whether dataset exists in S3")
+    s3_key: str | None = Field(None, description="S3 key if exists")
+    s3_row_count: int | None = Field(None, description="Row count in S3 Parquet")
+    last_modified: datetime | None = Field(None, description="Last modification time")
+
+
+class S3DataLakeStatus(BaseModel):
+    """Status of the S3 data lake."""
+
+    bucket: str | None = Field(None, description="S3 bucket")
+    region: str = Field("us-east-1", description="AWS region")
+    raw_prefix: str = Field(..., description="Raw data prefix")
+    curated_prefix: str = Field(..., description="Curated data prefix")
+    s3_enabled: bool = Field(False, description="Whether S3 is enabled")
+    datasets: list[S3DatasetStatus] = Field(
+        default_factory=list, description="Per-dataset status"
+    )
+    bootstrap_required: bool = Field(
+        True, description="True if bootstrap is required"
+    )

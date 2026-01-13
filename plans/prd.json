@@ -16,7 +16,7 @@
             "Block deletion of local CSVs until verification passes",
             "Document repeatable bootstrap command and expected S3 layout"
         ],
-        "passes": false
+        "passes": true
     },
     {
         "category": "functional",

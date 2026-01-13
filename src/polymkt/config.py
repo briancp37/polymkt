@@ -41,5 +41,12 @@ class Settings(BaseSettings):
     openai_embedding_model: str = "text-embedding-3-small"
     openai_embedding_dimensions: int = 1536
 
+    # S3 settings for cloud data lake
+    s3_bucket: str | None = None
+    s3_region: str = "us-east-1"
+    s3_raw_prefix: str = "raw/polymarket"
+    s3_curated_prefix: str = "curated/polymarket"
+    s3_enabled: bool = False  # Set True to enable S3 upload
+
 
 settings = Settings()
