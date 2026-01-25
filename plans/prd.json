@@ -1,170 +1,266 @@
 [
     {
         "category": "functional",
-        "description": "Bootstrap cloud data lake: convert existing CSVs to partitioned Parquet and upload to S3 (source of truth)",
+        "description": "Gamma API sync script: Fetch markets and events directly to S3 (no local CSV)",
         "steps": [
-            "Detect whether S3 Parquet datasets already exist for trades/events/markets",
-            "If not present, run one-time bootstrap: convert local CSVs to typed Parquet",
-            "Define canonical schemas for trades, events, and markets (types, nullable fields)",
-            "Partition Parquet by time (year/month/day) and hash bucket for market_id",
-            "Write raw Parquet to s3://<bucket>/raw/polymarket/<dataset>/",
-            "Write curated Parquet to s3://<bucket>/curated/polymarket/<dataset>/",
-            "Upload Parquet to S3 with deterministic file naming",
-            "Generate verification report: row counts, min/max timestamps, distinct market_ids vs CSV",
-            "Randomly sample rows and compare tx_hash/event_id between CSV and Parquet",
-            "Fail bootstrap if verification does not pass",
-            "Block deletion of local CSVs until verification passes",
-            "Document repeatable bootstrap command and expected S3 layout"
+            "Create scripts/s3_gamma_sync.py as combined script for markets and events",
+            "Fetch all markets from Gamma API endpoint https://gamma-api.polymarket.com/markets",
+            "Fetch all events from Gamma API endpoint https://gamma-api.polymarket.com/events",
+            "Paginate API requests with limit=500 and offset-based pagination",
+            "Order results by createdAt ascending for consistent ordering",
+            "Implement exponential backoff retry logic for HTTP 429 (rate limit) and 500 (server error)",
+            "Maximum 5 retries per request with delays: 429 -> 10s, 500 -> 5s, other -> 2s",
+            "Write raw API responses to S3 as JSONL: s3://polymarket-bcp892/raw/polymarket/gamma_api/{entity}/YYYY/MM/DD/{entity}_HHMMSS.jsonl",
+            "Each JSONL line contains one raw API record as-is for audit trail",
+            "Transform raw records to canonical parquet schema with proper types",
+            "Normalize timestamps to UTC with microsecond precision (pa.timestamp('us', tz='UTC'))",
+            "Normalize addresses to lowercase with 0x prefix",
+            "Parse event tags from JSON array of objects [{id, label, slug}] to list of label strings",
+            "Write cleaned markets.parquet to s3://polymarket-bcp892/raw/polymarket/markets.parquet",
+            "Write cleaned events.parquet to s3://polymarket-bcp892/raw/polymarket/events.parquet",
+            "Use atomic write pattern: write to temp path then rename to final path",
+            "Use zstd compression for parquet files",
+            "Support --dry-run flag to scan API without writing to S3",
+            "Support --entity flag to sync only 'markets' or 'events' or 'all' (default)",
+            "Log structured output with record counts, duration, S3 paths using structlog",
+            "Print human-readable progress to stdout for GitHub Actions visibility"
         ],
         "passes": true
     },
     {
         "category": "functional",
-        "description": "Introduce INGEST_MODE and ANALYTICS_MODE runtime controls with safe transitions",
+        "description": "Markets parquet schema definition matching existing conventions",
         "steps": [
-            "Add global runtime configuration with INGEST_MODE = off | batched | live",
-            "Add global runtime configuration with ANALYTICS_MODE = off | on_demand | live",
-            "Ensure INGEST_MODE=live can coexist with ANALYTICS_MODE=off",
-            "Persist current modes and last transition timestamp in ops metadata store",
-            "Implement safe transitions with idempotent start/stop semantics"
+            "Define MARKETS_SCHEMA as PyArrow schema with following fields:",
+            "  - id: pa.string() - Market unique identifier",
+            "  - question: pa.string() - Market question text",
+            "  - created_at: pa.timestamp('us', tz='UTC') - Market creation time",
+            "  - closed_time: pa.timestamp('us', tz='UTC') - Market close/resolution time (nullable)",
+            "  - category: pa.string() - Market category (nullable)",
+            "  - volume: pa.float64() - Total trading volume in USDC",
+            "  - token1: pa.string() - First outcome token contract address",
+            "  - token2: pa.string() - Second outcome token contract address",
+            "  - condition_id: pa.string() - Gnosis condition ID",
+            "  - slug: pa.string() - URL-friendly market slug",
+            "  - description: pa.string() - Full market description (nullable)",
+            "  - event_id: pa.string() - Parent event ID (nullable)",
+            "  - neg_risk: pa.bool_() - Whether market uses negative risk model",
+            "  - answer1: pa.string() - First outcome label (e.g., 'Yes')",
+            "  - answer2: pa.string() - Second outcome label (e.g., 'No')",
+            "  - ticker: pa.string() - Market ticker symbol (nullable)",
+            "  - tags: pa.list_(pa.string()) - List of tag labels from parent event",
+            "Handle nullable fields gracefully (None values where API returns null)"
         ],
         "passes": true
     },
     {
         "category": "functional",
-        "description": "Polymarket ingestion supports live, batched, and dormant operation",
+        "description": "Events parquet schema definition matching existing conventions",
         "steps": [
-            "INGEST_MODE=off disables all ingestion except manual backfill",
-            "INGEST_MODE=batched runs update_to_now() on a 5-minute cadence",
-            "INGEST_MODE=live runs a long-lived ingest/consumer loop",
-            "All ingestion paths archive events to S3 Parquet within 5 minutes",
-            "Watermarks advance monotonically and support resumable backfill"
+            "Define EVENTS_SCHEMA as PyArrow schema with following fields:",
+            "  - event_id: pa.string() - Event unique identifier (from 'id' in API)",
+            "  - title: pa.string() - Event title",
+            "  - description: pa.string() - Event description (nullable)",
+            "  - created_at: pa.timestamp('us', tz='UTC') - Event creation time",
+            "  - tags: pa.list_(pa.string()) - List of tag labels extracted from tag objects",
+            "Extract tag labels from API response format: [{id, label, slug, ...}] -> ['label1', 'label2']",
+            "Handle missing or null tags as empty list",
+            "Handle nullable description field"
         ],
         "passes": true
     },
     {
         "category": "functional",
-        "description": "Wallet tracking with average-cost accounting and 5-minute mark-to-market",
+        "description": "Verify existing order_filled sync script works for 10-minute cron",
         "steps": [
-            "Maintain per-wallet per-market per-outcome positions with average cost",
-            "Compute realized P&L on position size returning to zero",
-            "Compute mark-to-market P&L every 5 minutes using last trade price in window",
-            "Carry forward last known price if no trade in window; null until first print",
-            "Ignore closed positions with zero P&L for win percentage calculations"
-        ],
-        "passes": true
-    },
-    {
-        "category": "functional",
-        "description": "Win percentage and volume metrics",
-        "steps": [
-            "Win % is computed per closed position",
-            "A win is realized P&L > 0; loss < 0; P&L == 0 ignored",
-            "Volume is tracked as notional USDC traded",
-            "Expose metrics at 1m, 1h, and 1d rollups"
-        ],
-        "passes": true
-    },
-    {
-        "category": "functional",
-        "description": "ClickHouse serving layer for rollups and recent drilldowns",
-        "steps": [
-            "Deploy single-node ClickHouse on EC2 with EBS mounted at /var/lib/clickhouse",
-            "Create rollup tables: wallet_agg_1m, wallet_agg_1h, wallet_agg_1d",
-            "Create wallet_positions_current table",
-            "Optionally retain raw events in ClickHouse for last 30 days",
-            "All historical raw data remains in S3 Parquet as source of truth"
-        ],
-        "passes": true
-    },
-    {
-        "category": "functional",
-        "description": "ClickHouse lifecycle management and backups",
-        "steps": [
-            "Support stopping and starting ClickHouse EC2 for cost control",
-            "Implement on-demand analytics sessions with 120-minute idle TTL",
-            "Automatically stop ClickHouse after TTL expires with no activity",
-            "Take nightly EBS snapshots of ClickHouse data volume",
-            "Document restore procedure from snapshot"
+            "Verify scripts/s3_catchup.py fetches order_filled from Goldsky GraphQL API",
+            "Confirm API endpoint: https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/orderbook-subgraph/0.0.1/gn",
+            "Confirm query fetches orderFilledEvents with fields: timestamp, maker, makerAssetId, makerAmountFilled, taker, takerAssetId, takerAmountFilled, transactionHash",
+            "Confirm batch size of 1000 records per GraphQL query",
+            "Confirm buffer flush threshold of 50,000 rows per partition",
+            "Verify S3 partitioning by year/month/day: s3://polymarket-bcp892/raw/polymarket/order_filled/year=YYYY/month=MM/day=DD/",
+            "Verify resumability via get_latest_s3_timestamp() scanning existing partitions",
+            "Verify memory-efficient design with explicit gc.collect() between batches",
+            "Verify no local disk usage (streams directly to S3)",
+            "Verify --dry-run flag works to scan without writing",
+            "Verify --max-batches flag works for testing with limited data",
+            "Confirm zstd compression on output parquet files"
         ],
         "passes": false
     },
     {
         "category": "functional",
-        "description": "LLM-driven analytics with conservative guardrails",
+        "description": "Verify existing trades derivation script works for 10-minute cron",
         "steps": [
-            "Expose an analytics query interface callable by LLM and UI",
-            "Restrict LLM queries to ClickHouse rollup tables only",
-            "Restrict LLM queries to wallets present in the watchlist",
-            "Apply default time window limit of 7 days unless explicitly overridden",
-            "Enforce hard limits: max rows returned (10k), max execution time (30s), max memory",
-            "Reject queries that attempt to access raw event tables",
-            "Log executed SQL, parameters, execution time, and rows read to ops metadata store"
+            "Verify scripts/s3_trades_catchup.py derives trades from order_filled data",
+            "Confirm it reads order_filled parquet files from S3",
+            "Confirm it joins with markets data to compute trade attributes",
+            "Verify trade derivation logic: price = usd_amount / token_amount",
+            "Verify direction derivation: BUY/SELL based on maker vs taker side",
+            "Confirm batch processing of 100 files at a time for memory efficiency",
+            "Verify resumability via scanning latest trades timestamp in S3",
+            "Verify deduplication using transaction_hash",
+            "Verify S3 partitioning by year/month/day: s3://polymarket-bcp892/raw/polymarket/trades/year=YYYY/month=MM/day=DD/",
+            "Confirm dependency on order_filled completion (sequential execution in workflow)"
+        ],
+        "passes": false
+    },
+    {
+        "category": "functional",
+        "description": "GitHub Actions workflow for hourly Gamma API sync (markets + events)",
+        "steps": [
+            "Create .github/workflows/gamma-sync.yml",
+            "Configure schedule trigger with cron: '0 * * * *' (every hour at minute 0)",
+            "Configure workflow_dispatch trigger for manual runs with inputs:",
+            "  - entity: choice [all, markets, events] default 'all'",
+            "  - dry_run: boolean default false",
+            "Use ubuntu-latest runner",
+            "Set timeout-minutes: 15 (markets + events should complete in under 10 min)",
+            "Checkout repository with actions/checkout@v4",
+            "Setup Python 3.11 with actions/setup-python@v5",
+            "Install uv with astral-sh/setup-uv@v4",
+            "Run 'uv sync --frozen' to install dependencies",
+            "Configure AWS credentials with aws-actions/configure-aws-credentials@v4",
+            "  - aws-access-key-id from secrets.AWS_ACCESS_KEY_ID",
+            "  - aws-secret-access-key from secrets.AWS_SECRET_ACCESS_KEY",
+            "  - aws-region: us-east-1",
+            "Run s3_gamma_sync.py with appropriate flags based on inputs",
+            "Add step summary with sync statistics (markets count, events count, duration)"
+        ],
+        "passes": false
+    },
+    {
+        "category": "functional",
+        "description": "GitHub Actions workflow for 10-minute trades sync (order_filled + trades)",
+        "steps": [
+            "Create .github/workflows/trades-sync.yml",
+            "Configure schedule trigger with cron: '*/10 * * * *' (every 10 minutes)",
+            "Configure workflow_dispatch trigger for manual runs with inputs:",
+            "  - max_batches: number (optional, for testing)",
+            "  - dry_run: boolean default false",
+            "Use ubuntu-latest runner",
+            "Set timeout-minutes: 30 (allow time for large catchups)",
+            "Checkout repository with actions/checkout@v4",
+            "Setup Python 3.11 with actions/setup-python@v5",
+            "Install uv with astral-sh/setup-uv@v4",
+            "Run 'uv sync --frozen' to install dependencies",
+            "Configure AWS credentials with aws-actions/configure-aws-credentials@v4",
+            "Run s3_catchup.py first (order_filled from Goldsky)",
+            "Run s3_trades_catchup.py second (derive trades from order_filled)",
+            "Sequential execution required: trades depends on order_filled completion",
+            "Skip trades derivation step if dry_run is true",
+            "Add step summary with sync statistics"
+        ],
+        "passes": false
+    },
+    {
+        "category": "setup",
+        "description": "AWS IAM configuration for GitHub Actions S3 access",
+        "steps": [
+            "Create dedicated IAM user for GitHub Actions (e.g., 'github-actions-polymkt')",
+            "Attach IAM policy with S3 permissions for bucket polymarket-bcp892:",
+            "  - s3:GetObject - read existing data for watermark scanning",
+            "  - s3:PutObject - write new parquet files",
+            "  - s3:ListBucket - list partitions for resumability",
+            "  - s3:DeleteObject - cleanup temp files during atomic writes",
+            "Restrict policy to specific bucket ARN: arn:aws:s3:::polymarket-bcp892",
+            "Restrict policy to bucket contents: arn:aws:s3:::polymarket-bcp892/*",
+            "Generate access key and secret key for IAM user",
+            "Do not enable programmatic access for any other permissions",
+            "Document IAM policy JSON in prd.json for reference"
+        ],
+        "passes": false
+    },
+    {
+        "category": "setup",
+        "description": "GitHub repository secrets configuration",
+        "steps": [
+            "Navigate to repository Settings > Secrets and variables > Actions",
+            "Add repository secret AWS_ACCESS_KEY_ID with IAM user access key",
+            "Add repository secret AWS_SECRET_ACCESS_KEY with IAM user secret key",
+            "Verify secrets are not exposed in workflow logs (GitHub redacts by default)",
+            "Test secrets access by running workflow_dispatch manually",
+            "Document secret names in repository README or .github/README.md"
+        ],
+        "passes": false
+    },
+    {
+        "category": "functional",
+        "description": "S3 raw JSONL storage for API audit trail",
+        "steps": [
+            "Create S3 prefix structure: s3://polymarket-bcp892/raw/polymarket/gamma_api/",
+            "Organize by entity and date: gamma_api/{entity}/YYYY/MM/DD/",
+            "Filename format: {entity}_{HHMMSS}.jsonl (e.g., markets_143052.jsonl)",
+            "Each line in JSONL is one raw API record as JSON object",
+            "Preserve all API fields exactly as returned (no transformation)",
+            "Enable audit trail: can reconstruct any parquet from raw JSONL",
+            "Enable debugging: can inspect what API returned at any point",
+            "Consider lifecycle policy for old JSONL files (optional, not blocking)"
         ],
         "passes": true
     },
     {
         "category": "functional",
-        "description": "Sharp money v1 based on static watchlist",
+        "description": "Atomic parquet write pattern for data integrity",
         "steps": [
-            "Initialize watchlist with addresses: 0x63ce342161250d705dc0b16df89036c8e5f9ba9a and 0x5388bc8cb72eb19a3bec0e8f3db6a77f7cd54d5a",
-            "Track all trades for watchlisted wallets",
-            "Generate in-app alerts when watchlisted wallets trade",
-            "Persist watchlist and alert subscriptions in ops metadata store"
+            "Write parquet to temporary path first: {entity}_temp_{uuid}.parquet",
+            "Validate write succeeded by checking file exists and has expected row count",
+            "Rename (copy + delete) from temp path to final path: {entity}.parquet",
+            "S3 CopyObject is atomic - readers see either old or new file, never partial",
+            "Delete temp file after successful rename",
+            "If any step fails, temp file remains for debugging",
+            "Log all file operations for troubleshooting"
         ],
         "passes": true
     },
     {
-        "category": "functional",
-        "description": "Alerting system with latency SLA",
+        "category": "testing",
+        "description": "End-to-end verification of scheduled pipelines",
         "steps": [
-            "Generate in-app alerts for watchlist wallet trades",
-            "Ensure alerts are emitted within 10–30 seconds in INGEST_MODE=live",
-            "Deduplicate alerts by event id",
-            "Apply per-rule cooldown window to prevent spam"
+            "Run gamma-sync workflow manually via workflow_dispatch with dry_run=true",
+            "Verify script scans API endpoints and reports record counts",
+            "Run gamma-sync workflow with dry_run=false",
+            "Verify raw JSONL files appear in S3: aws s3 ls s3://polymarket-bcp892/raw/polymarket/gamma_api/markets/ --recursive",
+            "Verify markets.parquet exists: aws s3 ls s3://polymarket-bcp892/raw/polymarket/markets.parquet",
+            "Verify events.parquet exists: aws s3 ls s3://polymarket-bcp892/raw/polymarket/events.parquet",
+            "Download and validate parquet: python -c \"import pyarrow.parquet as pq; t = pq.read_table('markets.parquet'); print(t.num_rows, t.column_names)\"",
+            "Run trades-sync workflow manually via workflow_dispatch with dry_run=true",
+            "Verify s3_catchup.py reports latest S3 timestamp and would-be fetch range",
+            "Run trades-sync workflow with dry_run=false (or max_batches=10 for quick test)",
+            "Verify order_filled partitions appear in S3",
+            "Verify trades partitions appear in S3",
+            "Enable scheduled runs and monitor first few automated executions",
+            "Check GitHub Actions run history for any failures"
         ],
-        "passes": true
+        "passes": false
     },
     {
         "category": "functional",
-        "description": "Ops metadata and control plane",
+        "description": "Error handling and resilience for scheduled jobs",
         "steps": [
-            "Use SQLite to store watermarks, run history, mode state, and TTLs",
-            "Persist alert subscriptions and watchlists",
-            "Record ingestion runs and analytics session lifecycle",
-            "Enable future migration to Postgres without schema breakage"
+            "All API requests must have timeout (30 seconds recommended)",
+            "Implement retry with exponential backoff for transient failures",
+            "Log errors with full context (URL, status code, response body preview)",
+            "Exit with non-zero code on unrecoverable failure (triggers GitHub Actions failure)",
+            "Partial success should still write completed data (don't lose progress)",
+            "Scripts are idempotent: safe to re-run after partial failure",
+            "Watermark-based resumability ensures no duplicate data on retry",
+            "Consider adding Slack/Discord notification on workflow failure (optional enhancement)"
         ],
-        "passes": true
+        "passes": false
     },
     {
-        "category": "functional",
-        "description": "Carry-over: Each Dataset persists its market list (included/excluded) and can be edited later",
+        "category": "documentation",
+        "description": "Document scheduled pipeline architecture and operations",
         "steps": [
-            "Persist dataset definitions including included and excluded market ids",
-            "Allow editing dataset definitions without rebuilding all data",
-            "Ensure downstream jobs respect updated dataset definitions"
+            "Add section to README.md explaining scheduled data pipelines",
+            "Document S3 bucket structure and data organization",
+            "Document how to manually trigger workflows for testing",
+            "Document how to check pipeline health (workflow run history, S3 data freshness)",
+            "Document how to add new GitHub Secrets if credentials rotate",
+            "Document troubleshooting steps for common failures",
+            "Document data freshness SLAs: markets/events within 1 hour, trades within 10 minutes"
         ],
-        "passes": true
-    },
-    {
-        "category": "functional",
-        "description": "Carry-over: Strategy confirmation screen before execution",
-        "steps": [
-            "Parse strategy parameters from user or LLM",
-            "Display parsed strategy and parameters for confirmation",
-            "Require explicit confirmation before execution"
-        ],
-        "passes": true
-    },
-    {
-        "category": "functional",
-        "description": "Carry-over: Backtest results visualization",
-        "steps": [
-            "Generate equity curve for backtest results",
-            "Compute and display summary metrics",
-            "Display trades table with pagination",
-            "Store backtest artifacts for later viewing"
-        ],
-        "passes": true
+        "passes": false
     }
 ]
