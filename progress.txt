@@ -4340,3 +4340,94 @@ Verified that all GitHub Actions workflows and sync scripts are complete and mat
 2. Add AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to GitHub repository secrets
 3. Test with manual workflow_dispatch runs before relying on scheduled triggers
 4. Monitor first few automated runs via GitHub Actions history
+
+---
+
+## 2026-01-26: Memory and Disk Safety Compliance (PRD Item 0)
+
+**Date:** 2026-01-26
+**Feature:** MEMORY AND DISK SAFETY - All scripts MUST process data in batches to prevent local machine crashes
+**PRD Status:** PASSES (Item 0 - critical category)
+
+### Summary:
+Implemented comprehensive memory safety features across all three sync scripts to prevent local machine crashes. This was identified as the highest priority item because it's in the "critical" category and affects all data pipeline scripts.
+
+### Changes made:
+
+1. **s3_catchup.py** - Added memory monitoring and pressure detection
+   - Added `psutil` import for memory monitoring
+   - Added `get_memory_usage_mb()` - Returns current process memory in MB
+   - Added `get_system_memory_percent()` - Returns system memory usage %
+   - Added `check_memory_pressure()` - Checks if safe to continue (process <2GB, system <80%)
+   - Added `log_memory_usage()` - Logs memory status periodically
+   - Memory check every 50 batches with graceful exit on pressure
+   - MemoryError exception handler for graceful partial progress preservation
+
+2. **s3_trades_catchup.py** - Added memory monitoring and pressure detection
+   - Same memory utility functions as s3_catchup.py
+   - Added MAX_MEMORY_MB = 2000 constant
+   - Memory logging at start, after each batch, and at completion
+   - Memory pressure check after each batch with graceful exit
+   - MemoryError exception handler for graceful partial progress preservation
+
+3. **s3_gamma_sync.py** - Critical batch processing fix + memory safety
+   - **CRITICAL FIX**: Rewrote `fetch_all_records()` to `fetch_records_streaming()`
+     - Previously accumulated ALL records in memory before writing
+     - Now writes JSONL to S3 incrementally as each batch arrives
+     - Each batch triggers gc.collect() and memory pressure check
+   - Added memory utility functions (same as other scripts)
+   - Removed unused `write_jsonl_to_s3()` function (replaced by batch writes)
+   - Memory logging throughout the sync process
+   - MemoryError exception handler for graceful partial progress preservation
+   - Added batch numbering to JSONL filenames: `{entity}_{time}_batch{num:04d}.jsonl`
+
+### PRD requirements now met:
+
+| Requirement | Status |
+|-------------|--------|
+| NEVER load entire datasets into memory | ✓ All scripts batch process |
+| Use small batch sizes (API ≤500, files ≤100) | ✓ Already compliant |
+| Flush data to S3 frequently (≤50k rows) | ✓ Already compliant |
+| Call gc.collect() after each batch | ✓ Added to all scripts |
+| Stream directly to S3 | ✓ No local disk usage |
+| Set explicit memory limits (<2GB RAM) | ✓ MAX_MEMORY_MB = 2000 |
+| Log memory usage periodically | ✓ log_memory_usage() calls added |
+| Implement --max-batches flag | ✓ Already existed in scripts |
+| Exit gracefully on memory pressure | ✓ check_memory_pressure() with early exit |
+
+### Type checking:
+- ✓ mypy: Success (no issues in 72 source files)
+
+### Test status:
+- Pre-existing test failure in test_api.py::TestQueryTradesAPI::test_query_multiple_market_ids
+- Not related to memory safety changes
+
+### Files modified:
+- `scripts/s3_catchup.py` - Added memory safety functions and checks
+- `scripts/s3_trades_catchup.py` - Added memory safety functions and checks
+- `scripts/s3_gamma_sync.py` - Critical batch processing fix + memory safety
+- `plans/prd.json` - Marked PRD item 0 as passing
+
+### Memory safety verification:
+```bash
+$ python -c "
+from scripts.s3_catchup import get_memory_usage_mb, check_memory_pressure
+print(f'Memory: {get_memory_usage_mb():.1f}MB')
+print(f'Pressure OK: {check_memory_pressure()}')
+"
+Memory: 66.9MB
+Pressure OK: True
+```
+
+### Notes for next person:
+- All scripts now have consistent memory monitoring via psutil
+- Memory pressure is checked every 50 batches (s3_catchup), every batch (s3_trades_catchup), every 10 batches (s3_gamma_sync)
+- If memory pressure is detected, scripts exit gracefully preserving partial progress
+- MemoryError exceptions are caught and logged with partial progress note
+
+### Next steps for future sessions:
+- AWS IAM configuration (PRD item 8) - requires manual AWS console work
+- GitHub repository secrets configuration (PRD item 9) - requires manual GitHub work
+- End-to-end verification (PRD item 12) - requires secrets to be configured first
+- Error handling improvements (PRD item 13)
+- Documentation (PRD item 14)

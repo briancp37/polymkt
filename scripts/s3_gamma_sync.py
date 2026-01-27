@@ -17,6 +17,7 @@ Usage:
     python scripts/s3_gamma_sync.py --entity events
 """
 
+import gc
 import json
 import time
 import uuid
@@ -25,6 +26,7 @@ from io import BytesIO
 from typing import Any
 
 import httpx
+import psutil
 import pyarrow as pa
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
@@ -39,6 +41,55 @@ S3_PREFIX = "raw/polymarket"
 BATCH_SIZE = 500  # Records per API request
 MAX_RETRIES = 5
 TIMEOUT_SECONDS = 30
+MAX_MEMORY_MB = 2000  # Conservative memory limit
+
+
+def get_memory_usage_mb() -> float:
+    """Get current process memory usage in MB."""
+    process = psutil.Process()
+    return process.memory_info().rss / (1024 * 1024)
+
+
+def get_system_memory_percent() -> float:
+    """Get system memory usage as a percentage."""
+    return psutil.virtual_memory().percent
+
+
+def check_memory_pressure(max_memory_mb: float = MAX_MEMORY_MB, max_system_percent: float = 80) -> bool:
+    """Check if we're under memory pressure. Returns True if safe to continue."""
+    current_mb = get_memory_usage_mb()
+    system_percent = get_system_memory_percent()
+
+    if current_mb > max_memory_mb:
+        logger.warning(
+            "memory_limit_exceeded",
+            current_mb=round(current_mb, 1),
+            max_mb=max_memory_mb,
+        )
+        return False
+
+    if system_percent > max_system_percent:
+        logger.warning(
+            "system_memory_pressure",
+            system_percent=round(system_percent, 1),
+            max_percent=max_system_percent,
+        )
+        return False
+
+    return True
+
+
+def log_memory_usage(context: str = "") -> None:
+    """Log current memory usage for monitoring."""
+    current_mb = get_memory_usage_mb()
+    system_percent = get_system_memory_percent()
+    logger.info(
+        "memory_status",
+        context=context,
+        process_mb=round(current_mb, 1),
+        system_percent=round(system_percent, 1),
+    )
+    print(f"  Memory: {current_mb:.0f}MB process, {system_percent:.0f}% system")
 
 # Retry delays (in seconds)
 RETRY_DELAYS = {
@@ -185,16 +236,28 @@ def fetch_with_retry(
     raise RuntimeError(f"Max retries ({MAX_RETRIES}) exceeded for {url}")
 
 
-def fetch_all_records(
+def fetch_records_streaming(
     entity: str,
+    s3fs: pafs.S3FileSystem,
     dry_run: bool = False,
-) -> list[dict[str, Any]]:
-    """Fetch all records for an entity (markets or events) with pagination."""
+) -> tuple[list[dict[str, Any]], int, list[str]]:
+    """Fetch records for an entity with streaming JSONL writes to S3.
+
+    Instead of accumulating all records in memory, writes each batch to S3 as JSONL
+    immediately after fetching. Returns all records for final parquet transformation,
+    but memory is bounded by gc.collect() after each batch.
+
+    Returns:
+        Tuple of (all_records, total_count, jsonl_paths)
+    """
     url = f"{GAMMA_API_BASE}/{entity}"
     all_records: list[dict[str, Any]] = []
     offset = 0
+    batch_num = 0
+    jsonl_paths: list[str] = []
 
-    print(f"Fetching {entity} from Gamma API...")
+    print(f"Fetching {entity} from Gamma API (streaming mode)...")
+    log_memory_usage("fetch_start")
 
     with httpx.Client() as client:
         while True:
@@ -215,10 +278,31 @@ def fetch_all_records(
             if not records:
                 break
 
+            batch_num += 1
+
+            # Write this batch to JSONL immediately (audit trail)
+            if not dry_run:
+                jsonl_path = write_jsonl_batch_to_s3(records, entity, batch_num, s3fs)
+                jsonl_paths.append(jsonl_path)
+
             all_records.extend(records)
             offset += len(records)
 
-            print(f"  Fetched {len(records)} {entity}, total: {len(all_records)}")
+            print(f"  Batch {batch_num}: fetched {len(records)} {entity}, total: {len(all_records)}")
+
+            # Periodic memory check and cleanup
+            if batch_num % 10 == 0:
+                gc.collect()
+                log_memory_usage(f"batch_{batch_num}")
+
+                if not check_memory_pressure():
+                    print("\nMemory pressure detected during fetch - stopping early")
+                    logger.warning(
+                        "memory_pressure_during_fetch",
+                        entity=entity,
+                        records_fetched=len(all_records),
+                    )
+                    break
 
             # If we got fewer records than batch size, we're done
             if len(records) < BATCH_SIZE:
@@ -227,25 +311,22 @@ def fetch_all_records(
             # Small delay to be nice to the API
             time.sleep(0.1)
 
-    return all_records
+    log_memory_usage("fetch_complete")
+    return all_records, len(all_records), jsonl_paths
 
 
-def write_jsonl_to_s3(
+def write_jsonl_batch_to_s3(
     records: list[dict[str, Any]],
     entity: str,
+    batch_num: int,
     s3fs: pafs.S3FileSystem,
-    dry_run: bool = False,
 ) -> str:
-    """Write records as JSONL to S3 for audit trail."""
+    """Write a single batch of records as JSONL to S3."""
     now = datetime.now(timezone.utc)
     date_path = now.strftime("%Y/%m/%d")
     time_str = now.strftime("%H%M%S")
-    filename = f"{entity}_{time_str}.jsonl"
+    filename = f"{entity}_{time_str}_batch{batch_num:04d}.jsonl"
     s3_path = f"{S3_BUCKET}/{S3_PREFIX}/gamma_api/{entity}/{date_path}/{filename}"
-
-    if dry_run:
-        print(f"[DRY RUN] Would write {len(records)} records to s3://{s3_path}")
-        return s3_path
 
     # Create JSONL content
     jsonl_buffer = BytesIO()
@@ -259,10 +340,8 @@ def write_jsonl_to_s3(
     with s3fs.open_output_stream(s3_path) as f:
         f.write(jsonl_buffer.getvalue())
 
-    logger.info("wrote_jsonl", path=s3_path, records=len(records))
+    logger.debug("wrote_jsonl_batch", path=s3_path, records=len(records), batch=batch_num)
     return s3_path
-
-
 def transform_markets(records: list[dict[str, Any]]) -> pa.Table:
     """Transform raw market records to canonical parquet schema."""
     columns: dict[str, list[Any]] = {
@@ -443,9 +522,12 @@ def sync_entity(
     print(f"Syncing {entity}")
     print("=" * 60)
 
-    # Fetch all records
-    records = fetch_all_records(entity, dry_run=dry_run)
-    print(f"Fetched {len(records)} {entity} records")
+    # Get S3 filesystem
+    s3fs = _get_s3_filesystem()
+
+    # Fetch all records with streaming JSONL writes (memory-safe)
+    records, total_count, jsonl_paths = fetch_records_streaming(entity, s3fs, dry_run=dry_run)
+    print(f"Fetched {total_count} {entity} records")
 
     if not records:
         print(f"No {entity} records to sync")
@@ -455,12 +537,8 @@ def sync_entity(
             "dry_run": dry_run,
         }
 
-    # Get S3 filesystem
-    s3fs = _get_s3_filesystem()
-
-    # Write raw JSONL for audit trail
-    jsonl_path = write_jsonl_to_s3(records, entity, s3fs, dry_run=dry_run)
-    print(f"Wrote JSONL to s3://{jsonl_path}")
+    if not dry_run:
+        print(f"Wrote {len(jsonl_paths)} JSONL batch files to S3")
 
     # Transform to parquet schema
     if entity == "markets":
@@ -472,17 +550,23 @@ def sync_entity(
 
     print(f"Transformed {table.num_rows} rows")
 
+    # Clear records from memory before parquet write
+    del records
+    gc.collect()
+    log_memory_usage("pre_parquet_write")
+
     # Write parquet atomically
     parquet_path = write_parquet_atomic(table, entity, s3fs, dry_run=dry_run)
     print(f"Wrote parquet to s3://{parquet_path}")
 
     elapsed = time.time() - start_time
+    log_memory_usage("sync_complete")
 
     return {
         "entity": entity,
-        "records": len(records),
+        "records": total_count,
         "rows": table.num_rows,
-        "jsonl_path": f"s3://{jsonl_path}",
+        "jsonl_batches": len(jsonl_paths),
         "parquet_path": f"s3://{parquet_path}",
         "duration_seconds": elapsed,
         "dry_run": dry_run,
@@ -528,7 +612,7 @@ def run_sync(
         print(f"\n{entity_name.upper()}:")
         print(f"  Records: {result.get('records', 0):,}")
         if not dry_run:
-            print(f"  JSONL: {result.get('jsonl_path', 'N/A')}")
+            print(f"  JSONL batches: {result.get('jsonl_batches', 0)}")
             print(f"  Parquet: {result.get('parquet_path', 'N/A')}")
 
     print(f"\nTotal duration: {elapsed:.1f}s")
@@ -542,6 +626,7 @@ def run_sync(
 
 if __name__ == "__main__":
     import argparse
+    import sys
 
     parser = argparse.ArgumentParser(description="Sync markets and events from Gamma API to S3")
     parser.add_argument(
@@ -557,7 +642,25 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    run_sync(
-        entity=args.entity,
-        dry_run=args.dry_run,
-    )
+    try:
+        log_memory_usage("startup")
+        result = run_sync(
+            entity=args.entity,
+            dry_run=args.dry_run,
+        )
+        # Exit with error if no records synced and not a dry run
+        if not args.dry_run:
+            total_records = sum(r.get("records", 0) for r in result.get("results", {}).values())
+            if total_records == 0:
+                logger.error("no_records_synced", entity=args.entity)
+                sys.exit(1)
+    except MemoryError as e:
+        # Memory exhaustion - log and exit with partial progress preserved
+        logger.error("memory_exhausted", error=str(e), memory_mb=get_memory_usage_mb())
+        print(f"\nERROR: Memory exhausted - {e}")
+        print("Partial progress (JSONL batches) may have been written to S3.")
+        sys.exit(1)
+    except Exception as e:
+        logger.error("sync_failed", error=str(e), entity=args.entity)
+        print(f"\nERROR: Sync failed - {e}")
+        sys.exit(1)

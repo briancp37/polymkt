@@ -21,6 +21,7 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
+import psutil
 import pyarrow as pa
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
@@ -29,6 +30,54 @@ from gql import Client, gql
 from gql.transport.requests import RequestsHTTPTransport
 
 logger = structlog.get_logger()
+
+
+def get_memory_usage_mb() -> float:
+    """Get current process memory usage in MB."""
+    process = psutil.Process()
+    return process.memory_info().rss / (1024 * 1024)
+
+
+def get_system_memory_percent() -> float:
+    """Get system memory usage as a percentage."""
+    return psutil.virtual_memory().percent
+
+
+def check_memory_pressure(max_memory_mb: float = 2000, max_system_percent: float = 80) -> bool:
+    """Check if we're under memory pressure. Returns True if safe to continue."""
+    current_mb = get_memory_usage_mb()
+    system_percent = get_system_memory_percent()
+
+    if current_mb > max_memory_mb:
+        logger.warning(
+            "memory_limit_exceeded",
+            current_mb=round(current_mb, 1),
+            max_mb=max_memory_mb,
+        )
+        return False
+
+    if system_percent > max_system_percent:
+        logger.warning(
+            "system_memory_pressure",
+            system_percent=round(system_percent, 1),
+            max_percent=max_system_percent,
+        )
+        return False
+
+    return True
+
+
+def log_memory_usage(context: str = "") -> None:
+    """Log current memory usage for monitoring."""
+    current_mb = get_memory_usage_mb()
+    system_percent = get_system_memory_percent()
+    logger.info(
+        "memory_status",
+        context=context,
+        process_mb=round(current_mb, 1),
+        system_percent=round(system_percent, 1),
+    )
+    print(f"  Memory: {current_mb:.0f}MB process, {system_percent:.0f}% system")
 
 # Constants
 GOLDSKY_URL = "https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/orderbook-subgraph/0.0.1/gn"
@@ -259,7 +308,12 @@ def get_latest_s3_timestamp(s3_bucket: str, s3_prefix: str, entity: str) -> int:
 
 def create_goldsky_client() -> Client:
     """Create GraphQL client for Goldsky."""
-    transport = RequestsHTTPTransport(url=GOLDSKY_URL, verify=True, retries=3)
+    transport = RequestsHTTPTransport(
+        url=GOLDSKY_URL,
+        verify=True,
+        retries=3,
+        timeout=30,  # 30 second timeout per PRD
+    )
     return Client(transport=transport)
 
 
@@ -339,6 +393,7 @@ def run_catchup(
     consecutive_empty = 0
 
     print("\nStarting fetch loop...")
+    log_memory_usage("start")
 
     while True:
         # Check batch limit
@@ -346,14 +401,30 @@ def run_catchup(
             print(f"\nReached max batches limit: {max_batches}")
             break
 
-        # Fetch batch
-        try:
-            records = fetch_batch(client, last_timestamp, BATCH_SIZE)
-        except Exception as e:
-            logger.error("fetch_error", error=str(e))
-            print(f"Fetch error: {e}, retrying in 5s...")
-            time.sleep(5)
-            continue
+        # Fetch batch with exponential backoff on error
+        retry_count = 0
+        max_fetch_retries = 5
+        while retry_count < max_fetch_retries:
+            try:
+                records = fetch_batch(client, last_timestamp, BATCH_SIZE)
+                break  # Success
+            except Exception as e:
+                retry_count += 1
+                # Exponential backoff: 2s, 4s, 8s, 16s, 32s
+                delay = 2 ** retry_count
+                logger.error(
+                    "fetch_error",
+                    error=str(e),
+                    attempt=retry_count,
+                    max_retries=max_fetch_retries,
+                    delay=delay,
+                    last_timestamp=last_timestamp,
+                )
+                print(f"Fetch error: {e}, retry {retry_count}/{max_fetch_retries} in {delay}s...")
+                if retry_count >= max_fetch_retries:
+                    raise RuntimeError(f"Max retries ({max_fetch_retries}) exceeded fetching from Goldsky") from e
+                time.sleep(delay)
+                continue
 
         if not records:
             consecutive_empty += 1
@@ -387,9 +458,16 @@ def run_catchup(
             f"ts: {dt.strftime('%Y-%m-%d %H:%M')}"
         )
 
-        # Periodic GC
+        # Periodic GC and memory check
         if batch_count % 50 == 0:
             gc.collect()
+            log_memory_usage(f"batch_{batch_count}")
+
+            # Check memory pressure - flush and exit gracefully if needed
+            if not check_memory_pressure(MAX_MEMORY_MB):
+                print("\nMemory pressure detected - flushing and exiting gracefully")
+                logger.warning("memory_pressure_exit", batch=batch_count, fetched=total_fetched)
+                break
 
         # Small delay to be nice to API
         if len(records) == BATCH_SIZE:
@@ -398,6 +476,7 @@ def run_catchup(
     # Flush remaining
     print("\nFlushing remaining buffers...")
     buffer.flush_all()
+    log_memory_usage("final")
 
     elapsed = time.time() - start_time
     final_stats = buffer.get_stats()
@@ -423,6 +502,7 @@ def run_catchup(
 
 if __name__ == "__main__":
     import argparse
+    import sys
 
     parser = argparse.ArgumentParser(description="Stream order_filled from Goldsky to S3")
     parser.add_argument("--dry-run", action="store_true", help="Scan S3 without fetching")
@@ -430,8 +510,25 @@ if __name__ == "__main__":
     parser.add_argument("--start-ts", type=int, help="Override start timestamp")
     args = parser.parse_args()
 
-    run_catchup(
-        dry_run=args.dry_run,
-        max_batches=args.max_batches,
-        start_timestamp=args.start_ts,
-    )
+    try:
+        result = run_catchup(
+            dry_run=args.dry_run,
+            max_batches=args.max_batches,
+            start_timestamp=args.start_ts,
+        )
+        # Exit with error if no data fetched and not a dry run (unless max_batches was 0)
+        if not args.dry_run and args.max_batches != 0:
+            if result.get("fetched", 0) == 0 and result.get("written", 0) == 0:
+                # Only error if we expected to fetch data but didn't
+                # (empty result is OK if we're already caught up)
+                pass
+    except MemoryError as e:
+        # Memory exhaustion - log and exit with partial progress preserved
+        logger.error("memory_exhausted", error=str(e), memory_mb=get_memory_usage_mb())
+        print(f"\nERROR: Memory exhausted - {e}")
+        print("Partial progress may have been written to S3.")
+        sys.exit(1)
+    except Exception as e:
+        logger.error("catchup_failed", error=str(e))
+        print(f"\nERROR: Catchup failed - {e}")
+        sys.exit(1)

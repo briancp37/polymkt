@@ -17,6 +17,7 @@ import time
 from datetime import datetime, timezone
 
 import polars as pl
+import psutil
 import pyarrow as pa
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
@@ -28,6 +29,55 @@ logger = structlog.get_logger()
 S3_BUCKET = "polymarket-bcp892"
 S3_PREFIX = "raw/polymarket"
 FILES_PER_BATCH = 100  # Process this many files at a time
+MAX_MEMORY_MB = 2000  # Conservative memory limit
+
+
+def get_memory_usage_mb() -> float:
+    """Get current process memory usage in MB."""
+    process = psutil.Process()
+    return process.memory_info().rss / (1024 * 1024)
+
+
+def get_system_memory_percent() -> float:
+    """Get system memory usage as a percentage."""
+    return psutil.virtual_memory().percent
+
+
+def check_memory_pressure(max_memory_mb: float = MAX_MEMORY_MB, max_system_percent: float = 80) -> bool:
+    """Check if we're under memory pressure. Returns True if safe to continue."""
+    current_mb = get_memory_usage_mb()
+    system_percent = get_system_memory_percent()
+
+    if current_mb > max_memory_mb:
+        logger.warning(
+            "memory_limit_exceeded",
+            current_mb=round(current_mb, 1),
+            max_mb=max_memory_mb,
+        )
+        return False
+
+    if system_percent > max_system_percent:
+        logger.warning(
+            "system_memory_pressure",
+            system_percent=round(system_percent, 1),
+            max_percent=max_system_percent,
+        )
+        return False
+
+    return True
+
+
+def log_memory_usage(context: str = "") -> None:
+    """Log current memory usage for monitoring."""
+    current_mb = get_memory_usage_mb()
+    system_percent = get_system_memory_percent()
+    logger.info(
+        "memory_status",
+        context=context,
+        process_mb=round(current_mb, 1),
+        system_percent=round(system_percent, 1),
+    )
+    print(f"  Memory: {current_mb:.0f}MB process, {system_percent:.0f}% system")
 
 
 def get_markets_df() -> pl.DataFrame:
@@ -307,6 +357,8 @@ def run_catchup(dry_run: bool = False, batch_size: int = FILES_PER_BATCH) -> dic
         print("No files to process - already up to date!")
         return {"rows_processed": 0, "trades_written": 0}
 
+    log_memory_usage("start")
+
     # Process in batches
     total_order_filled = 0
     total_trades = 0
@@ -356,8 +408,20 @@ def run_catchup(dry_run: bool = False, batch_size: int = FILES_PER_BATCH) -> dic
         del order_filled_df
         del trades_df
         gc.collect()
+        log_memory_usage(f"batch_{batch_num + 1}")
+
+        # Check memory pressure - exit gracefully if needed
+        if not check_memory_pressure():
+            print("\nMemory pressure detected - exiting gracefully with partial progress")
+            logger.warning(
+                "memory_pressure_exit",
+                batch=batch_num + 1,
+                trades_written=total_trades,
+            )
+            break
 
     elapsed = time.time() - start_time
+    log_memory_usage("final")
 
     print("\n" + "=" * 60)
     print("Trades Catchup Complete!")
@@ -378,10 +442,23 @@ def run_catchup(dry_run: bool = False, batch_size: int = FILES_PER_BATCH) -> dic
 
 if __name__ == "__main__":
     import argparse
+    import sys
 
     parser = argparse.ArgumentParser(description="Process order_filled into trades")
     parser.add_argument("--dry-run", action="store_true", help="Scan without processing")
     parser.add_argument("--batch-size", type=int, default=FILES_PER_BATCH, help="Files per batch")
     args = parser.parse_args()
 
-    run_catchup(dry_run=args.dry_run, batch_size=args.batch_size)
+    try:
+        result = run_catchup(dry_run=args.dry_run, batch_size=args.batch_size)
+        # Success - no need to exit with error for zero trades (could be caught up)
+    except MemoryError as e:
+        # Memory exhaustion - log and exit with partial progress preserved
+        logger.error("memory_exhausted", error=str(e), memory_mb=get_memory_usage_mb())
+        print(f"\nERROR: Memory exhausted - {e}")
+        print("Partial progress may have been written to S3.")
+        sys.exit(1)
+    except Exception as e:
+        logger.error("trades_catchup_failed", error=str(e))
+        print(f"\nERROR: Trades catchup failed - {e}")
+        sys.exit(1)

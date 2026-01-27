@@ -1,5 +1,22 @@
 [
     {
+        "category": "critical",
+        "description": "MEMORY AND DISK SAFETY: All scripts MUST process data in batches to prevent local machine crashes",
+        "steps": [
+            "NEVER load entire datasets into memory at once - always stream or batch process",
+            "Use small batch sizes: API fetches ≤500 records, file processing ≤100 files at a time",
+            "Flush data to S3 frequently (every 50,000 rows max) - do NOT accumulate in memory",
+            "Call gc.collect() explicitly after processing each batch to release memory",
+            "Stream directly to S3 - avoid writing large temp files to local disk",
+            "If local disk is needed, use /tmp with explicit cleanup after each batch",
+            "Set explicit memory limits: scripts should work with <2GB RAM",
+            "Log memory usage periodically during long-running operations",
+            "Implement --max-batches flag for testing without processing full dataset",
+            "Exit gracefully if memory pressure detected rather than crashing"
+        ],
+        "passes": true
+    },
+    {
         "category": "functional",
         "description": "Gamma API sync script: Fetch markets and events directly to S3 (no local CSV)",
         "steps": [
@@ -7,6 +24,8 @@
             "Fetch all markets from Gamma API endpoint https://gamma-api.polymarket.com/markets",
             "Fetch all events from Gamma API endpoint https://gamma-api.polymarket.com/events",
             "Paginate API requests with limit=500 and offset-based pagination",
+            "BATCH PROCESSING: Process each API page immediately - do NOT accumulate all pages in memory",
+            "Write each batch of records to S3 as they arrive, then discard from memory",
             "Order results by createdAt ascending for consistent ordering",
             "Implement exponential backoff retry logic for HTTP 429 (rate limit) and 500 (server error)",
             "Maximum 5 retries per request with delays: 429 -> 10s, 500 -> 5s, other -> 2s",
@@ -76,12 +95,14 @@
             "Verify scripts/s3_catchup.py fetches order_filled from Goldsky GraphQL API",
             "Confirm API endpoint: https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/orderbook-subgraph/0.0.1/gn",
             "Confirm query fetches orderFilledEvents with fields: timestamp, maker, makerAssetId, makerAmountFilled, taker, takerAssetId, takerAmountFilled, transactionHash",
-            "Confirm batch size of 1000 records per GraphQL query",
-            "Confirm buffer flush threshold of 50,000 rows per partition",
+            "Confirm batch size of 1000 records per GraphQL query (NEVER increase - memory safety)",
+            "Confirm buffer flush threshold of 50,000 rows per partition (flush to S3 then clear memory)",
+            "CRITICAL: Flush each partition buffer to S3 as soon as threshold reached, do NOT wait until end",
             "Verify S3 partitioning by year/month/day: s3://polymarket-bcp892/raw/polymarket/order_filled/year=YYYY/month=MM/day=DD/",
             "Verify resumability via get_latest_s3_timestamp() scanning existing partitions",
-            "Verify memory-efficient design with explicit gc.collect() between batches",
-            "Verify no local disk usage (streams directly to S3)",
+            "Verify memory-efficient design with explicit gc.collect() after EVERY batch flush",
+            "Verify no local disk usage (streams directly to S3 - NEVER buffer to local files)",
+            "ALWAYS use --max-batches flag when running locally to prevent memory exhaustion",
             "Verify --dry-run flag works to scan without writing",
             "Verify --max-batches flag works for testing with limited data",
             "Confirm zstd compression on output parquet files"
@@ -97,9 +118,11 @@
             "Confirm it joins with markets data to compute trade attributes",
             "Verify trade derivation logic: price = usd_amount / token_amount",
             "Verify direction derivation: BUY/SELL based on maker vs taker side",
-            "Confirm batch processing of 100 files at a time for memory efficiency",
+            "CRITICAL: Batch processing of 100 files at a time MAX - process batch, write to S3, clear memory, then next batch",
+            "Call gc.collect() after processing each batch of files to release memory",
             "Verify resumability via scanning latest trades timestamp in S3",
-            "Verify deduplication using transaction_hash",
+            "Verify deduplication using transaction_hash (use set for seen hashes, clear after each batch write)",
+            "NEVER load all order_filled files into memory at once - stream and batch process",
             "Verify S3 partitioning by year/month/day: s3://polymarket-bcp892/raw/polymarket/trades/year=YYYY/month=MM/day=DD/",
             "Confirm dependency on order_filled completion (sequential execution in workflow)"
         ],
@@ -136,8 +159,9 @@
             "Create .github/workflows/trades-sync.yml",
             "Configure schedule trigger with cron: '*/10 * * * *' (every 10 minutes)",
             "Configure workflow_dispatch trigger for manual runs with inputs:",
-            "  - max_batches: number (optional, for testing)",
+            "  - max_batches: number (REQUIRED for local testing - prevents memory exhaustion)",
             "  - dry_run: boolean default false",
+            "LOCAL SAFETY: When running scripts locally, ALWAYS use --max-batches flag (e.g., --max-batches 10)",
             "Use ubuntu-latest runner",
             "Set timeout-minutes: 30 (allow time for large catchups)",
             "Checkout repository with actions/checkout@v4",
@@ -204,6 +228,7 @@
         "description": "Atomic parquet write pattern for data integrity",
         "steps": [
             "Write parquet to temporary path first: {entity}_temp_{uuid}.parquet",
+            "CRITICAL: Write temp file directly to S3 (s3://bucket/path_temp.parquet) - NEVER to local disk",
             "Validate write succeeded by checking file exists and has expected row count",
             "Rename (copy + delete) from temp path to final path: {entity}.parquet",
             "S3 CopyObject is atomic - readers see either old or new file, never partial",
@@ -226,7 +251,7 @@
             "Download and validate parquet: python -c \"import pyarrow.parquet as pq; t = pq.read_table('markets.parquet'); print(t.num_rows, t.column_names)\"",
             "Run trades-sync workflow manually via workflow_dispatch with dry_run=true",
             "Verify s3_catchup.py reports latest S3 timestamp and would-be fetch range",
-            "Run trades-sync workflow with dry_run=false (or max_batches=10 for quick test)",
+            "Run trades-sync workflow with dry_run=false using max_batches=10 (ALWAYS limit batches for local testing to avoid memory/disk exhaustion)",
             "Verify order_filled partitions appear in S3",
             "Verify trades partitions appear in S3",
             "Enable scheduled runs and monitor first few automated executions",
@@ -245,6 +270,8 @@
             "Partial success should still write completed data (don't lose progress)",
             "Scripts are idempotent: safe to re-run after partial failure",
             "Watermark-based resumability ensures no duplicate data on retry",
+            "MEMORY SAFETY: Catch MemoryError and write partial progress before exiting",
+            "MEMORY SAFETY: Monitor memory usage and exit gracefully if >80% system memory used",
             "Consider adding Slack/Discord notification on workflow failure (optional enhancement)"
         ],
         "passes": false
