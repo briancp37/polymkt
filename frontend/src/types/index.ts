@@ -25,7 +25,7 @@ export interface Dataset extends DatasetSummary {
 }
 
 export interface DatasetListResponse {
-  items: DatasetSummary[];
+  datasets: DatasetSummary[];
   count: number;
   total_count: number;
   has_more: boolean;
@@ -80,22 +80,29 @@ export interface EquityCurvePoint {
 export interface BacktestSummary {
   id: string;
   dataset_id: string;
-  dataset_name?: string;
+  strategy_name: string;
+  status: 'pending' | 'running' | 'completed' | 'failed';
+  total_return?: number;
+  trade_count?: number;
+  created_at: string;
+  completed_at?: string;
+}
+
+export interface Backtest {
+  id: string;
+  dataset_id: string;
   strategy_config: StrategyConfig;
   status: 'pending' | 'running' | 'completed' | 'failed';
   metrics?: BacktestMetrics;
+  trades?: BacktestTradeRecord[];
+  equity_curve?: EquityCurvePoint[];
   created_at: string;
   completed_at?: string;
   error_message?: string;
 }
 
-export interface Backtest extends BacktestSummary {
-  trades: BacktestTradeRecord[];
-  equity_curve: EquityCurvePoint[];
-}
-
 export interface BacktestListResponse {
-  items: BacktestSummary[];
+  backtests: BacktestSummary[];
   count: number;
   total_count: number;
   has_more: boolean;

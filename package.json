@@ -9,5 +9,7 @@
     "format": "ruff format src tests",
     "dev": "uvicorn src.polymkt.api.main:app --reload"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "puppeteer": "^24.35.0"
+  }
 }

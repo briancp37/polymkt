@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate, Link } from 'react-router-dom';
-import { LineChart, Calendar, TrendingUp, TrendingDown, Clock, Plus } from 'lucide-react';
+import { LineChart, Calendar, Plus } from 'lucide-react';
 import { format } from 'date-fns';
 import { listBacktests } from '../api/client';
 import { Card, CardContent, Badge, Button, PageLoading, EmptyState } from '../components';
@@ -30,8 +30,7 @@ function StatusBadge({ status }: { status: BacktestSummary['status'] }) {
 
 function BacktestCard({ backtest }: { backtest: BacktestSummary }) {
   const navigate = useNavigate();
-  const metrics = backtest.metrics;
-  const isWinning = metrics && metrics.total_pnl > 0;
+  const isWinning = backtest.total_return !== undefined && backtest.total_return > 0;
 
   return (
     <Card
@@ -43,19 +42,17 @@ function BacktestCard({ backtest }: { backtest: BacktestSummary }) {
         <div className="flex items-start justify-between mb-3">
           <div className="flex-1 min-w-0">
             <h3 className="text-lg font-semibold text-gray-900 truncate">
-              {backtest.strategy_config.name}
+              {backtest.strategy_name}
             </h3>
-            {backtest.dataset_name && (
-              <p className="text-sm text-gray-500 truncate">
-                on {backtest.dataset_name}
-              </p>
-            )}
+            <p className="text-sm text-gray-500 truncate">
+              Dataset {backtest.dataset_id.slice(0, 8)}...
+            </p>
           </div>
           <StatusBadge status={backtest.status} />
         </div>
 
         {/* Metrics (if completed) */}
-        {metrics && (
+        {backtest.status === 'completed' && (
           <div className="grid grid-cols-2 gap-3 mb-4">
             <div className="bg-gray-50 rounded-md p-2">
               <div className="text-xs text-gray-500">Total Return</div>
@@ -64,50 +61,20 @@ function BacktestCard({ backtest }: { backtest: BacktestSummary }) {
                   isWinning ? 'text-green-600' : 'text-red-600'
                 }`}
               >
-                {formatPercent(metrics.total_return)}
-              </div>
-            </div>
-            <div className="bg-gray-50 rounded-md p-2">
-              <div className="text-xs text-gray-500">Total PnL</div>
-              <div
-                className={`text-lg font-semibold ${
-                  isWinning ? 'text-green-600' : 'text-red-600'
-                }`}
-              >
-                {formatCurrency(metrics.total_pnl)}
-              </div>
-            </div>
-            <div className="bg-gray-50 rounded-md p-2">
-              <div className="text-xs text-gray-500">Win Rate</div>
-              <div className="text-lg font-semibold text-gray-900">
-                {formatPercent(metrics.win_rate)}
+                {formatPercent(backtest.total_return)}
               </div>
             </div>
             <div className="bg-gray-50 rounded-md p-2">
               <div className="text-xs text-gray-500">Trades</div>
               <div className="text-lg font-semibold text-gray-900">
-                {metrics.trade_count}
+                {backtest.trade_count ?? 0}
               </div>
             </div>
           </div>
         )}
 
-        {/* Strategy details */}
-        <div className="mt-auto space-y-2">
-          <div className="flex items-center gap-2 text-sm text-gray-600">
-            <Clock className="w-4 h-4" />
-            Entry: {backtest.strategy_config.entry_days_to_exp} days to exp
-          </div>
-          <div className="flex items-center gap-2 text-sm text-gray-600">
-            {isWinning ? (
-              <TrendingUp className="w-4 h-4 text-green-600" />
-            ) : (
-              <TrendingDown className="w-4 h-4 text-red-600" />
-            )}
-            Exit: {backtest.strategy_config.exit_rule}
-          </div>
-
-          {/* Date */}
+        {/* Date */}
+        <div className="mt-auto">
           <div className="flex items-center text-xs text-gray-400 pt-2 border-t border-gray-100">
             <Calendar className="w-3 h-3 mr-1" />
             {backtest.completed_at
@@ -160,9 +127,9 @@ export function BacktestsPage() {
       </div>
 
       {/* Backtest Grid */}
-      {data && data.items.length > 0 ? (
+      {data && data.backtests.length > 0 ? (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {data.items.map((backtest) => (
+          {data.backtests.map((backtest) => (
             <BacktestCard key={backtest.id} backtest={backtest} />
           ))}
         </div>

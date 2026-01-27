@@ -27,7 +27,7 @@ export function HomePage() {
     return <PageLoading />;
   }
 
-  const isConnected = !healthError && health?.status === 'ok';
+  const isConnected = !healthError && health?.status === 'healthy';
 
   return (
     <div>
@@ -100,7 +100,7 @@ export function HomePage() {
               </div>
               <div>
                 <div className="text-2xl font-bold text-gray-900">
-                  {backtests?.items.filter((b) => b.status === 'completed').length ?? 0}
+                  {backtests?.backtests.filter((b) => b.status === 'completed').length ?? 0}
                 </div>
                 <div className="text-sm text-gray-500">Completed Runs</div>
               </div>
@@ -123,9 +123,9 @@ export function HomePage() {
             </Link>
           </div>
           <CardContent className="p-0">
-            {datasets && datasets.items.length > 0 ? (
+            {datasets && datasets.datasets.length > 0 ? (
               <div className="divide-y divide-gray-100">
-                {datasets.items.map((dataset) => (
+                {datasets.datasets.map((dataset) => (
                   <Link
                     key={dataset.id}
                     to={`/datasets/${dataset.id}`}
@@ -163,9 +163,9 @@ export function HomePage() {
             </Link>
           </div>
           <CardContent className="p-0">
-            {backtests && backtests.items.length > 0 ? (
+            {backtests && backtests.backtests.length > 0 ? (
               <div className="divide-y divide-gray-100">
-                {backtests.items.map((backtest) => (
+                {backtests.backtests.map((backtest) => (
                   <Link
                     key={backtest.id}
                     to={`/backtests/${backtest.id}`}
@@ -174,10 +174,10 @@ export function HomePage() {
                     <div className="flex items-center justify-between">
                       <div>
                         <div className="font-medium text-gray-900">
-                          {backtest.strategy_config.name}
+                          {backtest.strategy_name}
                         </div>
                         <div className="text-sm text-gray-500">
-                          {backtest.dataset_name ?? 'Dataset'}
+                          Dataset {backtest.dataset_id.slice(0, 8)}...
                         </div>
                       </div>
                       <Badge

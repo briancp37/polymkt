@@ -36,6 +36,20 @@ class ValidationResult:
         return len(self.error_messages) > 0
 
 
+@dataclass
+class BatchValidationResult:
+    """Result of validating a single batch (memory-efficient, no row storage)."""
+
+    valid_batch: pa.RecordBatch
+    rows_processed: int = 0
+    rows_valid: int = 0
+    rows_quarantined: int = 0
+    error_sample: str | None = None  # Only store a sample error, not all
+
+
+# Maximum quarantined rows to store in memory (for sampling)
+MAX_QUARANTINE_SAMPLES = 100
+
 # Regex pattern for valid Ethereum addresses
 ETH_ADDRESS_PATTERN = re.compile(r"^(0x)?[a-fA-F0-9]{40}$")
 
@@ -91,12 +105,45 @@ def normalize_timestamp(
             return value.replace(tzinfo=timezone.utc)
         return value.astimezone(timezone.utc)
 
+    # Handle Unix epoch timestamps (int or float)
+    if isinstance(value, (int, float)):
+        # Detect milliseconds vs seconds
+        if value > 1e12:  # Likely milliseconds
+            return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+
     # If string, try to parse
     if isinstance(value, str):
         if not value or value.strip() == "":
             return None
 
+        value = value.strip()
+
+        # Try to parse as Unix epoch (numeric string)
+        try:
+            epoch = float(value)
+            # Detect milliseconds vs seconds
+            if epoch > 1e12:  # Likely milliseconds
+                return datetime.fromtimestamp(epoch / 1000, tz=timezone.utc)
+            return datetime.fromtimestamp(epoch, tz=timezone.utc)
+        except ValueError:
+            pass  # Not a numeric string, continue with datetime format parsing
+
+        # Normalize short timezone offsets like +00 to +0000
+        # Matches patterns like +00, -05, +0530, etc.
+        tz_match = re.search(r'([+-])(\d{2})(?::?(\d{2}))?$', value)
+        if tz_match:
+            sign, hours, minutes = tz_match.groups()
+            minutes = minutes or '00'
+            # Normalize to +HHMM format without colon
+            normalized_tz = f"{sign}{hours}{minutes}"
+            value = value[:tz_match.start()] + normalized_tz
+
         timestamp_formats = [
+            "%Y-%m-%d %H:%M:%S%z",
+            "%Y-%m-%dT%H:%M:%S%z",
+            "%Y-%m-%dT%H:%M:%S.%f%z",
+            "%Y-%m-%d %H:%M:%S.%f%z",
             "%Y-%m-%d %H:%M:%S",
             "%Y-%m-%dT%H:%M:%S",
             "%Y-%m-%dT%H:%M:%S.%f",
@@ -108,8 +155,10 @@ def normalize_timestamp(
 
         for fmt in timestamp_formats:
             try:
-                dt = datetime.strptime(value.strip(), fmt)
-                return dt.replace(tzinfo=timezone.utc)
+                dt = datetime.strptime(value, fmt)
+                if dt.tzinfo is None:
+                    return dt.replace(tzinfo=timezone.utc)
+                return dt.astimezone(timezone.utc)
             except ValueError:
                 continue
 
@@ -250,9 +299,10 @@ def validate_and_normalize_trades(
         )
 
         if not has_required:
-            result.quarantined_rows.append(
-                {"row_index": row_idx, "row": row, "errors": row_errors}
-            )
+            if len(result.quarantined_rows) < MAX_QUARANTINE_SAMPLES:
+                result.quarantined_rows.append(
+                    {"row_index": row_idx, "row": row, "errors": row_errors}
+                )
             result.error_messages.extend(
                 [f"Row {row_idx}: {e}" for e in row_errors]
             )
@@ -262,9 +312,10 @@ def validate_and_normalize_trades(
         ts = normalize_timestamp(row.get("timestamp"), "timestamp")
         if ts is None:
             row_errors.append(f"Invalid timestamp: {row.get('timestamp')}")
-            result.quarantined_rows.append(
-                {"row_index": row_idx, "row": row, "errors": row_errors}
-            )
+            if len(result.quarantined_rows) < MAX_QUARANTINE_SAMPLES:
+                result.quarantined_rows.append(
+                    {"row_index": row_idx, "row": row, "errors": row_errors}
+                )
             result.error_messages.extend(
                 [f"Row {row_idx}: {e}" for e in row_errors]
             )
@@ -274,9 +325,10 @@ def validate_and_normalize_trades(
         price = normalize_numeric(row.get("price"), "price", min_value=0.0, max_value=1.0)
         if price is None:
             row_errors.append(f"Invalid price: {row.get('price')} (expected 0-1)")
-            result.quarantined_rows.append(
-                {"row_index": row_idx, "row": row, "errors": row_errors}
-            )
+            if len(result.quarantined_rows) < MAX_QUARANTINE_SAMPLES:
+                result.quarantined_rows.append(
+                    {"row_index": row_idx, "row": row, "errors": row_errors}
+                )
             result.error_messages.extend(
                 [f"Row {row_idx}: {e}" for e in row_errors]
             )
@@ -365,18 +417,20 @@ def validate_and_normalize_markets(
 
         # Validate required fields
         if not _check_required_field(row, "id", row_errors):
-            result.quarantined_rows.append(
-                {"row_index": row_idx, "row": row, "errors": row_errors}
-            )
+            if len(result.quarantined_rows) < MAX_QUARANTINE_SAMPLES:
+                result.quarantined_rows.append(
+                    {"row_index": row_idx, "row": row, "errors": row_errors}
+                )
             result.error_messages.extend(
                 [f"Row {row_idx}: {e}" for e in row_errors]
             )
             continue
 
         if not _check_required_field(row, "question", row_errors):
-            result.quarantined_rows.append(
-                {"row_index": row_idx, "row": row, "errors": row_errors}
-            )
+            if len(result.quarantined_rows) < MAX_QUARANTINE_SAMPLES:
+                result.quarantined_rows.append(
+                    {"row_index": row_idx, "row": row, "errors": row_errors}
+                )
             result.error_messages.extend(
                 [f"Row {row_idx}: {e}" for e in row_errors]
             )
@@ -457,9 +511,10 @@ def validate_and_normalize_events(
 
         # Validate required field: event_id
         if not _check_required_field(row, "event_id", row_errors):
-            result.quarantined_rows.append(
-                {"row_index": row_idx, "row": row, "errors": row_errors}
-            )
+            if len(result.quarantined_rows) < MAX_QUARANTINE_SAMPLES:
+                result.quarantined_rows.append(
+                    {"row_index": row_idx, "row": row, "errors": row_errors}
+                )
             result.error_messages.extend(
                 [f"Row {row_idx}: {e}" for e in row_errors]
             )
@@ -473,9 +528,10 @@ def validate_and_normalize_events(
         if tags is not None:
             if not isinstance(tags, list):
                 row_errors.append(f"Invalid tags: expected list, got {type(tags).__name__}")
-                result.quarantined_rows.append(
-                    {"row_index": row_idx, "row": row, "errors": row_errors}
-                )
+                if len(result.quarantined_rows) < MAX_QUARANTINE_SAMPLES:
+                    result.quarantined_rows.append(
+                        {"row_index": row_idx, "row": row, "errors": row_errors}
+                    )
                 result.error_messages.extend(
                     [f"Row {row_idx}: {e}" for e in row_errors]
                 )
@@ -557,9 +613,10 @@ def validate_and_normalize_order_filled(
         )
 
         if not has_required:
-            result.quarantined_rows.append(
-                {"row_index": row_idx, "row": row, "errors": row_errors}
-            )
+            if len(result.quarantined_rows) < MAX_QUARANTINE_SAMPLES:
+                result.quarantined_rows.append(
+                    {"row_index": row_idx, "row": row, "errors": row_errors}
+                )
             result.error_messages.extend(
                 [f"Row {row_idx}: {e}" for e in row_errors]
             )
@@ -569,9 +626,10 @@ def validate_and_normalize_order_filled(
         ts = normalize_timestamp(row.get("timestamp"), "timestamp")
         if ts is None:
             row_errors.append(f"Invalid timestamp: {row.get('timestamp')}")
-            result.quarantined_rows.append(
-                {"row_index": row_idx, "row": row, "errors": row_errors}
-            )
+            if len(result.quarantined_rows) < MAX_QUARANTINE_SAMPLES:
+                result.quarantined_rows.append(
+                    {"row_index": row_idx, "row": row, "errors": row_errors}
+                )
             result.error_messages.extend(
                 [f"Row {row_idx}: {e}" for e in row_errors]
             )
@@ -622,5 +680,436 @@ def validate_and_normalize_order_filled(
             count=result.rows_quarantined,
             sample_errors=result.error_messages[:5],
         )
+
+    return result
+
+
+# =============================================================================
+# Vectorized Batch Validation Functions (Memory-Efficient)
+# =============================================================================
+# These functions use PyArrow compute operations instead of Python loops
+# for processing large datasets without memory exhaustion.
+
+
+def _vectorized_normalize_timestamp_column(
+    col: pa.Array,
+    field_name: str,
+) -> pa.Array:
+    """
+    Normalize a timestamp column using vectorized operations.
+
+    Handles string timestamps by parsing them in bulk.
+    """
+    if pa.types.is_timestamp(col.type):
+        # Already a timestamp, just ensure UTC
+        return col
+
+    if not pa.types.is_string(col.type) and not pa.types.is_large_string(col.type):
+        # Not a string, try to cast
+        try:
+            return col.cast(pa.timestamp("us", tz="UTC"))
+        except pa.ArrowInvalid:
+            return col
+
+    # String column - parse timestamps
+    # Use PyArrow's strptime for bulk parsing
+    try:
+        # Try ISO format first (most common)
+        parsed = pc.strptime(col, format="%Y-%m-%d %H:%M:%S", unit="us")
+        return parsed
+    except pa.ArrowInvalid:
+        pass
+
+    try:
+        # Try ISO with T separator
+        parsed = pc.strptime(col, format="%Y-%m-%dT%H:%M:%S", unit="us")
+        return parsed
+    except pa.ArrowInvalid:
+        pass
+
+    # Fall back to per-value parsing for complex formats (but still return array)
+    logger.warning(
+        "timestamp_fallback_parsing",
+        field=field_name,
+        message="Using fallback timestamp parsing",
+    )
+    results = []
+    for val in col.to_pylist():
+        results.append(normalize_timestamp(val, field_name))
+    return pa.array(results, type=pa.timestamp("us", tz="UTC"))
+
+
+def _vectorized_normalize_address_column(col: pa.Array) -> pa.Array:
+    """
+    Normalize an entire column of Ethereum addresses using vectorized operations.
+
+    Converts to lowercase and ensures 0x prefix.
+    """
+    if col.null_count == len(col):
+        return col  # All nulls, nothing to do
+
+    # Use PyArrow string operations for bulk processing
+    # Convert to lowercase
+    lowered = pc.utf8_lower(col)
+
+    # Check for 0x prefix and add if missing (vectorized)
+    has_prefix = pc.starts_with(lowered, "0x")
+    prefix_array = pa.array(["0x"] * len(col), type=pa.string())
+
+    # Where no prefix, prepend "0x"
+    result = pc.if_else(
+        has_prefix,
+        lowered,
+        pc.binary_join_element_wise(prefix_array, lowered, ""),
+    )
+
+    return result
+
+
+def validate_trades_batch(
+    batch: pa.RecordBatch,
+    target_schema: pa.Schema,
+    normalize_addresses: bool = True,
+) -> BatchValidationResult:
+    """
+    Validate and normalize a batch of trades using vectorized operations.
+
+    Memory-efficient: processes data in Arrow format without Python conversion.
+
+    Args:
+        batch: PyArrow RecordBatch of trades data
+        target_schema: Target schema to conform to
+        normalize_addresses: Whether to normalize address fields
+
+    Returns:
+        BatchValidationResult with valid batch only
+    """
+    result = BatchValidationResult(
+        valid_batch=batch,
+        rows_processed=batch.num_rows,
+    )
+
+    if batch.num_rows == 0:
+        return result
+
+    # Convert to table for easier column operations
+    table = pa.Table.from_batches([batch])
+    column_names = table.column_names
+
+    # Build validity mask using vectorized operations
+    validity_masks = []
+
+    # Check required fields are not null
+    required_fields = ["timestamp", "market_id", "price", "transaction_hash"]
+    for field in required_fields:
+        if field in column_names:
+            col = table.column(field)
+            not_null = pc.is_valid(col)
+            validity_masks.append(not_null)
+        else:
+            # Field missing entirely - all rows invalid
+            result.error_sample = f"Missing required field: {field}"
+            result.rows_valid = 0
+            result.rows_quarantined = batch.num_rows
+            result.valid_batch = batch.slice(0, 0)
+            return result
+
+    # Validate price range (0-1)
+    if "price" in column_names:
+        price_col = table.column("price")
+        # Cast to float if needed
+        if not pa.types.is_floating(price_col.type):
+            try:
+                price_col = price_col.cast(pa.float64())
+            except pa.ArrowInvalid:
+                result.error_sample = "Invalid price values (cannot cast to float)"
+
+        price_valid = pc.and_(
+            pc.greater_equal(price_col, 0.0),
+            pc.less_equal(price_col, 1.0),
+        )
+        validity_masks.append(price_valid)
+
+    # Combine all validity masks
+    if validity_masks:
+        combined_mask = validity_masks[0]
+        for mask in validity_masks[1:]:
+            combined_mask = pc.and_(combined_mask, mask)
+    else:
+        combined_mask = pa.array([True] * batch.num_rows, type=pa.bool_())
+
+    # Filter to valid rows
+    valid_table = table.filter(combined_mask)
+
+    # Now normalize columns in the valid table
+    columns = {}
+    for field in target_schema:
+        if field.name in valid_table.column_names:
+            col = valid_table.column(field.name)
+
+            # Handle timestamp normalization
+            if pa.types.is_timestamp(field.type):
+                col = _vectorized_normalize_timestamp_column(col, field.name)
+
+            # Handle address normalization
+            if normalize_addresses and field.name in ("maker", "taker"):
+                col = _vectorized_normalize_address_column(col)
+
+            # Cast to target type
+            try:
+                col = col.cast(field.type)
+            except pa.ArrowInvalid:
+                pass  # Keep original type if cast fails
+
+            columns[field.name] = col
+        else:
+            # Create null column for missing fields
+            columns[field.name] = pa.nulls(valid_table.num_rows, type=field.type)
+
+    # Build final table with target schema
+    final_table = pa.table(columns, schema=target_schema)
+
+    result.valid_batch = final_table.to_batches()[0] if final_table.num_rows > 0 else batch.slice(0, 0)
+    result.rows_valid = final_table.num_rows
+    result.rows_quarantined = batch.num_rows - final_table.num_rows
+
+    return result
+
+
+def validate_markets_batch(
+    batch: pa.RecordBatch,
+    target_schema: pa.Schema,
+) -> BatchValidationResult:
+    """
+    Validate and normalize a batch of markets using vectorized operations.
+
+    Args:
+        batch: PyArrow RecordBatch of markets data
+        target_schema: Target schema to conform to
+
+    Returns:
+        BatchValidationResult with valid batch only
+    """
+    result = BatchValidationResult(
+        valid_batch=batch,
+        rows_processed=batch.num_rows,
+    )
+
+    if batch.num_rows == 0:
+        return result
+
+    table = pa.Table.from_batches([batch])
+    column_names = table.column_names
+
+    # Build validity mask
+    validity_masks = []
+
+    # Check required fields
+    required_fields = ["id", "question"]
+    for field in required_fields:
+        if field in column_names:
+            col = table.column(field)
+            not_null = pc.is_valid(col)
+            validity_masks.append(not_null)
+        else:
+            result.error_sample = f"Missing required field: {field}"
+            result.rows_valid = 0
+            result.rows_quarantined = batch.num_rows
+            result.valid_batch = batch.slice(0, 0)
+            return result
+
+    # Combine validity masks
+    if validity_masks:
+        combined_mask = validity_masks[0]
+        for mask in validity_masks[1:]:
+            combined_mask = pc.and_(combined_mask, mask)
+    else:
+        combined_mask = pa.array([True] * batch.num_rows, type=pa.bool_())
+
+    valid_table = table.filter(combined_mask)
+
+    # Normalize columns
+    columns = {}
+    for field in target_schema:
+        if field.name in valid_table.column_names:
+            col = valid_table.column(field.name)
+
+            # Handle timestamp normalization
+            if pa.types.is_timestamp(field.type):
+                col = _vectorized_normalize_timestamp_column(col, field.name)
+
+            try:
+                col = col.cast(field.type)
+            except pa.ArrowInvalid:
+                pass
+
+            columns[field.name] = col
+        else:
+            columns[field.name] = pa.nulls(valid_table.num_rows, type=field.type)
+
+    final_table = pa.table(columns, schema=target_schema)
+
+    result.valid_batch = final_table.to_batches()[0] if final_table.num_rows > 0 else batch.slice(0, 0)
+    result.rows_valid = final_table.num_rows
+    result.rows_quarantined = batch.num_rows - final_table.num_rows
+
+    return result
+
+
+def validate_order_filled_batch(
+    batch: pa.RecordBatch,
+    target_schema: pa.Schema,
+    normalize_addresses: bool = True,
+) -> BatchValidationResult:
+    """
+    Validate and normalize a batch of order_filled using vectorized operations.
+
+    Args:
+        batch: PyArrow RecordBatch of order_filled data
+        target_schema: Target schema to conform to
+        normalize_addresses: Whether to normalize address fields
+
+    Returns:
+        BatchValidationResult with valid batch only
+    """
+    result = BatchValidationResult(
+        valid_batch=batch,
+        rows_processed=batch.num_rows,
+    )
+
+    if batch.num_rows == 0:
+        return result
+
+    table = pa.Table.from_batches([batch])
+    column_names = table.column_names
+
+    validity_masks = []
+
+    # Check required fields
+    required_fields = ["timestamp", "transaction_hash"]
+    for field in required_fields:
+        if field in column_names:
+            col = table.column(field)
+            not_null = pc.is_valid(col)
+            validity_masks.append(not_null)
+        else:
+            result.error_sample = f"Missing required field: {field}"
+            result.rows_valid = 0
+            result.rows_quarantined = batch.num_rows
+            result.valid_batch = batch.slice(0, 0)
+            return result
+
+    # Combine validity masks
+    if validity_masks:
+        combined_mask = validity_masks[0]
+        for mask in validity_masks[1:]:
+            combined_mask = pc.and_(combined_mask, mask)
+    else:
+        combined_mask = pa.array([True] * batch.num_rows, type=pa.bool_())
+
+    valid_table = table.filter(combined_mask)
+
+    # Normalize columns
+    columns = {}
+    for field in target_schema:
+        if field.name in valid_table.column_names:
+            col = valid_table.column(field.name)
+
+            if pa.types.is_timestamp(field.type):
+                col = _vectorized_normalize_timestamp_column(col, field.name)
+
+            if normalize_addresses and field.name in ("maker", "taker"):
+                col = _vectorized_normalize_address_column(col)
+
+            try:
+                col = col.cast(field.type)
+            except pa.ArrowInvalid:
+                pass
+
+            columns[field.name] = col
+        else:
+            columns[field.name] = pa.nulls(valid_table.num_rows, type=field.type)
+
+    final_table = pa.table(columns, schema=target_schema)
+
+    result.valid_batch = final_table.to_batches()[0] if final_table.num_rows > 0 else batch.slice(0, 0)
+    result.rows_valid = final_table.num_rows
+    result.rows_quarantined = batch.num_rows - final_table.num_rows
+
+    return result
+
+
+def validate_events_batch(
+    batch: pa.RecordBatch,
+    target_schema: pa.Schema,
+) -> BatchValidationResult:
+    """
+    Validate and normalize a batch of events using vectorized operations.
+
+    Args:
+        batch: PyArrow RecordBatch of events data
+        target_schema: Target schema to conform to
+
+    Returns:
+        BatchValidationResult with valid batch only
+    """
+    result = BatchValidationResult(
+        valid_batch=batch,
+        rows_processed=batch.num_rows,
+    )
+
+    if batch.num_rows == 0:
+        return result
+
+    table = pa.Table.from_batches([batch])
+    column_names = table.column_names
+
+    validity_masks = []
+
+    # Check required field: event_id
+    if "event_id" in column_names:
+        col = table.column("event_id")
+        not_null = pc.is_valid(col)
+        validity_masks.append(not_null)
+    else:
+        result.error_sample = "Missing required field: event_id"
+        result.rows_valid = 0
+        result.rows_quarantined = batch.num_rows
+        result.valid_batch = batch.slice(0, 0)
+        return result
+
+    # Combine validity masks
+    if validity_masks:
+        combined_mask = validity_masks[0]
+        for mask in validity_masks[1:]:
+            combined_mask = pc.and_(combined_mask, mask)
+    else:
+        combined_mask = pa.array([True] * batch.num_rows, type=pa.bool_())
+
+    valid_table = table.filter(combined_mask)
+
+    # Normalize columns
+    columns = {}
+    for field in target_schema:
+        if field.name in valid_table.column_names:
+            col = valid_table.column(field.name)
+
+            if pa.types.is_timestamp(field.type):
+                col = _vectorized_normalize_timestamp_column(col, field.name)
+
+            try:
+                col = col.cast(field.type)
+            except pa.ArrowInvalid:
+                pass
+
+            columns[field.name] = col
+        else:
+            columns[field.name] = pa.nulls(valid_table.num_rows, type=field.type)
+
+    final_table = pa.table(columns, schema=target_schema)
+
+    result.valid_batch = final_table.to_batches()[0] if final_table.num_rows > 0 else batch.slice(0, 0)
+    result.rows_valid = final_table.num_rows
+    result.rows_quarantined = batch.num_rows - final_table.num_rows
 
     return result

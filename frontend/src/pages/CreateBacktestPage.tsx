@@ -127,7 +127,7 @@ export function CreateBacktestPage() {
     return <PageLoading />;
   }
 
-  const datasets = datasetsData?.items || [];
+  const datasets = datasetsData?.datasets || [];
 
   return (
     <div className="max-w-2xl mx-auto">

@@ -1,0 +1,26 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+                "s3:ListBucket",
+                "s3:DeleteObject"
+            ],
+            "Resource": [
+                "arn:aws:s3:::polymarket-bcp892",
+                "arn:aws:s3:::polymarket-bcp892/*"
+            ]
+        }
+    ]
+}
+aws iam create-policy \
+    --policy-name polymkt-s3-access \
+    --policy-document file://config/aws_policy.json
+
+    434552667190
+    aws iam attach-user-policy \
+    --user-name github-actions-polymkt \
+    --policy-arn arn:aws:iam::434552667190:policy/polymkt-s3-access

@@ -288,6 +288,6 @@
             "Document troubleshooting steps for common failures",
             "Document data freshness SLAs: markets/events within 1 hour, trades within 10 minutes"
         ],
-        "passes": false
+        "passes": true
     }
 ]
