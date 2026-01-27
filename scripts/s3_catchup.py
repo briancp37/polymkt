@@ -86,6 +86,10 @@ S3_PREFIX = "raw/polymarket"
 BATCH_SIZE = 1000  # Records per Goldsky query
 BUFFER_FLUSH_THRESHOLD = 50000  # Rows per partition before flush
 MAX_MEMORY_MB = 2000  # Conservative memory limit
+# Goldsky rate limit: 300 requests/minute = 5 req/sec
+# Use 0.25s delay = 4 req/sec (80% of limit, safe margin)
+REQUEST_DELAY_SECONDS = 0.25
+RATE_LIMIT_BACKOFF_SECONDS = 30  # Backoff after hitting 429
 
 # Schema for order_filled
 ORDER_FILLED_SCHEMA = pa.schema([
@@ -311,10 +315,10 @@ def create_goldsky_client() -> Client:
     transport = RequestsHTTPTransport(
         url=GOLDSKY_URL,
         verify=True,
-        retries=3,
+        retries=0,  # Disable transport retries - we handle retries ourselves with proper backoff
         timeout=30,  # 30 second timeout per PRD
     )
-    return Client(transport=transport)
+    return Client(transport=transport, fetch_schema_from_transport=False)
 
 
 def fetch_batch(client: Client, last_timestamp: int, batch_size: int = 1000) -> list[dict]:
@@ -422,13 +426,25 @@ def run_catchup(
                 break  # Success
             except Exception as e:
                 retry_count += 1
-                # Exponential backoff: 2s, 4s, 8s, 16s, 32s
-                delay = 2 ** retry_count
+                error_str = str(e).lower()
+
+                # Detect rate limit (429) - use much longer backoff
+                is_rate_limit = "429" in error_str or "rate" in error_str or "too many" in error_str
+
+                if is_rate_limit:
+                    # Rate limited: use fixed long backoff
+                    delay = RATE_LIMIT_BACKOFF_SECONDS
+                    print(f"Rate limited (429) - backing off for {delay}s...")
+                else:
+                    # Other errors: exponential backoff 2s, 4s, 8s, 16s, 32s
+                    delay = 2 ** retry_count
+
                 logger.error(
                     "fetch_error",
                     url=GOLDSKY_URL,
                     error_type=type(e).__name__,
                     error=str(e),
+                    is_rate_limit=is_rate_limit,
                     attempt=retry_count,
                     max_retries=max_fetch_retries,
                     delay=delay,
@@ -496,9 +512,8 @@ def run_catchup(
                 logger.warning("memory_pressure_exit", batch=batch_count, fetched=total_fetched)
                 break
 
-        # Small delay to be nice to API
-        if len(records) == BATCH_SIZE:
-            time.sleep(0.1)
+        # Rate limit: delay between requests to avoid 429s
+        time.sleep(REQUEST_DELAY_SECONDS)
 
     # Flush remaining - ensure partial success writes data
     print("\nFlushing remaining buffers...")
