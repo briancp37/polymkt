@@ -85,11 +85,11 @@ S3_PREFIX = "raw/polymarket"
 BATCH_SIZE = 1000  # Records per Goldsky query
 BUFFER_FLUSH_THRESHOLD = 50000  # Rows per partition before flush
 MAX_MEMORY_MB = 2000  # Conservative memory limit
-# Goldsky rate limit: 300 requests/minute = 5 req/sec
-# Use 0.2s delay = 5 req/sec (matches limit exactly)
-# With httpx we have full control - no hidden retries
-REQUEST_DELAY_SECONDS = 0.2
-RATE_LIMIT_BACKOFF_SECONDS = 10  # Short backoff - rate limits typically reset quickly
+# Goldsky PUBLIC endpoint rate limit is much stricter than documented
+# Empirically: hit 429 after 18 requests in 11 seconds (~100 req/min)
+# Use 1s delay = 60 req/min (safe margin under ~100 req/min limit)
+REQUEST_DELAY_SECONDS = 1.0
+RATE_LIMIT_BACKOFF_SECONDS = 15  # Short backoff since we're well under limit now
 
 # Schema for order_filled
 ORDER_FILLED_SCHEMA = pa.schema([
