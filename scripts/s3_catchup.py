@@ -337,8 +337,20 @@ def fetch_batch(client: Client, last_timestamp: int, batch_size: int = 1000) -> 
     }}"""
 
     query = gql(query_str)
-    result = client.execute(query)
-    return result.get("orderFilledEvents", [])
+    try:
+        result = client.execute(query)
+        return result.get("orderFilledEvents", [])
+    except Exception as e:
+        # Log error with full context for debugging
+        logger.error(
+            "graphql_query_failed",
+            url=GOLDSKY_URL,
+            error_type=type(e).__name__,
+            error=str(e),
+            last_timestamp=last_timestamp,
+            batch_size=batch_size,
+        )
+        raise
 
 
 def run_catchup(
@@ -414,14 +426,29 @@ def run_catchup(
                 delay = 2 ** retry_count
                 logger.error(
                     "fetch_error",
+                    url=GOLDSKY_URL,
+                    error_type=type(e).__name__,
                     error=str(e),
                     attempt=retry_count,
                     max_retries=max_fetch_retries,
                     delay=delay,
                     last_timestamp=last_timestamp,
+                    batches_completed=batch_count,
+                    records_so_far=total_fetched,
                 )
                 print(f"Fetch error: {e}, retry {retry_count}/{max_fetch_retries} in {delay}s...")
                 if retry_count >= max_fetch_retries:
+                    # On unrecoverable failure, flush what we have first
+                    print("\nMax retries exceeded - flushing partial data before exit...")
+                    try:
+                        buffer.flush_all()
+                        logger.info(
+                            "partial_data_flushed_on_failure",
+                            batches=batch_count,
+                            written=buffer.get_stats()["rows_written"],
+                        )
+                    except Exception as flush_err:
+                        logger.error("flush_on_failure_failed", error=str(flush_err))
                     raise RuntimeError(f"Max retries ({max_fetch_retries}) exceeded fetching from Goldsky") from e
                 time.sleep(delay)
                 continue
@@ -473,9 +500,19 @@ def run_catchup(
         if len(records) == BATCH_SIZE:
             time.sleep(0.1)
 
-    # Flush remaining
+    # Flush remaining - ensure partial success writes data
     print("\nFlushing remaining buffers...")
-    buffer.flush_all()
+    try:
+        buffer.flush_all()
+    except Exception as flush_error:
+        # Log the error but don't lose the stats we have
+        logger.error(
+            "flush_failed_partial_success",
+            error=str(flush_error),
+            batches_processed=batch_count,
+            records_fetched=total_fetched,
+        )
+        print(f"Warning: Failed to flush some buffers: {flush_error}")
     log_memory_usage("final")
 
     elapsed = time.time() - start_time

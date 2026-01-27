@@ -261,6 +261,8 @@ def read_files_batch(files: list[str], start_ts: datetime | None) -> pl.DataFram
     s3fs = pafs.S3FileSystem(region="us-east-1")
 
     all_dfs = []
+    files_read = 0
+    files_failed = 0
     for path in files:
         try:
             table = pq.read_table(path, filesystem=s3fs)
@@ -271,10 +273,28 @@ def read_files_batch(files: list[str], start_ts: datetime | None) -> pl.DataFram
 
             if len(df) > 0:
                 all_dfs.append(df)
+            files_read += 1
 
         except Exception as e:
-            logger.warning("error_reading_file", path=path, error=str(e))
+            files_failed += 1
+            logger.warning(
+                "error_reading_file",
+                path=path,
+                error_type=type(e).__name__,
+                error=str(e),
+                files_read=files_read,
+                files_failed=files_failed,
+            )
+            # Continue processing other files - partial success is acceptable
             continue
+
+    if files_failed > 0:
+        logger.info(
+            "batch_read_partial_success",
+            files_read=files_read,
+            files_failed=files_failed,
+            total_files=len(files),
+        )
 
     if not all_dfs:
         return pl.DataFrame()
@@ -289,9 +309,10 @@ def write_trades_to_s3(df: pl.DataFrame) -> dict:
 
     files_written = 0
     rows_written = 0
+    files_failed = 0
 
     if len(df) == 0:
-        return {"files_written": 0, "rows_written": 0}
+        return {"files_written": 0, "rows_written": 0, "files_failed": 0}
 
     # Group by day
     df = df.with_columns([
@@ -303,25 +324,46 @@ def write_trades_to_s3(df: pl.DataFrame) -> dict:
     for (year, month, day), group in df.group_by(["year", "month", "day"]):
         partition_key = f"year={year}/month={month:02d}/day={day:02d}"
 
-        # Convert to arrow
-        group_clean = group.drop(["year", "month", "day"])
-        table = group_clean.to_arrow()
+        try:
+            # Convert to arrow
+            group_clean = group.drop(["year", "month", "day"])
+            table = group_clean.to_arrow()
 
-        # Generate filename
-        ts_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
-        row_count = len(group)
-        filename = f"trades_{ts_str}_{row_count}.parquet"
-        s3_path = f"{S3_BUCKET}/{S3_PREFIX}/trades/{partition_key}/{filename}"
+            # Generate filename
+            ts_str = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
+            row_count = len(group)
+            filename = f"trades_{ts_str}_{row_count}.parquet"
+            s3_path = f"{S3_BUCKET}/{S3_PREFIX}/trades/{partition_key}/{filename}"
 
-        # Write
-        pq.write_table(table, s3_path, filesystem=s3fs, compression="zstd")
+            # Write
+            pq.write_table(table, s3_path, filesystem=s3fs, compression="zstd")
 
-        files_written += 1
-        rows_written += row_count
+            files_written += 1
+            rows_written += row_count
 
-        logger.info("partition_written", partition=partition_key, rows=row_count)
+            logger.info("partition_written", partition=partition_key, rows=row_count)
 
-    return {"files_written": files_written, "rows_written": rows_written}
+        except Exception as e:
+            files_failed += 1
+            logger.error(
+                "partition_write_failed",
+                partition=partition_key,
+                rows=len(group),
+                error_type=type(e).__name__,
+                error=str(e),
+                files_written_so_far=files_written,
+            )
+            # Continue with other partitions - partial success is acceptable
+
+    if files_failed > 0:
+        logger.warning(
+            "write_partial_success",
+            files_written=files_written,
+            files_failed=files_failed,
+            rows_written=rows_written,
+        )
+
+    return {"files_written": files_written, "rows_written": rows_written, "files_failed": files_failed}
 
 
 def run_catchup(dry_run: bool = False, batch_size: int = FILES_PER_BATCH) -> dict:

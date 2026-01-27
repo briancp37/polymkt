@@ -191,18 +191,23 @@ def fetch_with_retry(
                     "retrying_request",
                     status=response.status_code,
                     attempt=attempt + 1,
+                    max_retries=MAX_RETRIES,
                     delay=delay,
                     url=url,
+                    params=params,
+                    response_body_preview=response.text[:200] if response.text else None,
                 )
                 time.sleep(delay)
                 continue
 
-            # Non-retryable error
+            # Non-retryable error - log with full context
             logger.error(
-                "request_failed",
+                "request_failed_non_retryable",
                 status=response.status_code,
-                body=response.text[:500],
                 url=url,
+                params=params,
+                response_body_preview=response.text[:500] if response.text else None,
+                response_headers=dict(response.headers),
             )
             raise httpx.HTTPStatusError(
                 f"Request failed with status {response.status_code}",
@@ -210,13 +215,17 @@ def fetch_with_retry(
                 response=response,
             )
 
-        except httpx.TimeoutException:
+        except httpx.TimeoutException as e:
             delay = RETRY_DELAYS["default"]
             logger.warning(
                 "request_timeout",
+                error_type=type(e).__name__,
                 attempt=attempt + 1,
+                max_retries=MAX_RETRIES,
                 delay=delay,
+                timeout_seconds=TIMEOUT_SECONDS,
                 url=url,
+                params=params,
             )
             time.sleep(delay)
             continue
@@ -225,10 +234,13 @@ def fetch_with_retry(
             delay = RETRY_DELAYS["default"]
             logger.warning(
                 "request_error",
+                error_type=type(e).__name__,
                 error=str(e),
                 attempt=attempt + 1,
+                max_retries=MAX_RETRIES,
                 delay=delay,
                 url=url,
+                params=params,
             )
             time.sleep(delay)
             continue
@@ -247,6 +259,9 @@ def fetch_records_streaming(
     immediately after fetching. Returns all records for final parquet transformation,
     but memory is bounded by gc.collect() after each batch.
 
+    Partial success: If fetching fails partway through, already-written JSONL files
+    are preserved for audit trail and potential recovery.
+
     Returns:
         Tuple of (all_records, total_count, jsonl_paths)
     """
@@ -255,6 +270,7 @@ def fetch_records_streaming(
     offset = 0
     batch_num = 0
     jsonl_paths: list[str] = []
+    fetch_error: Exception | None = None
 
     print(f"Fetching {entity} from Gamma API (streaming mode)...")
     log_memory_usage("fetch_start")
@@ -273,7 +289,25 @@ def fetch_records_streaming(
                 print(f"[DRY RUN] Would continue fetching from offset {offset}")
                 break
 
-            records = fetch_with_retry(client, url, params)
+            try:
+                records = fetch_with_retry(client, url, params)
+            except Exception as e:
+                # Log error with full context but continue with partial data
+                fetch_error = e
+                logger.error(
+                    "fetch_stopped_with_partial_data",
+                    entity=entity,
+                    url=url,
+                    offset=offset,
+                    batches_completed=batch_num,
+                    records_fetched=len(all_records),
+                    jsonl_files_written=len(jsonl_paths),
+                    error_type=type(e).__name__,
+                    error=str(e),
+                )
+                print(f"\nFetch error at offset {offset}: {e}")
+                print(f"Continuing with {len(all_records)} records fetched so far...")
+                break
 
             if not records:
                 break
@@ -282,8 +316,18 @@ def fetch_records_streaming(
 
             # Write this batch to JSONL immediately (audit trail)
             if not dry_run:
-                jsonl_path = write_jsonl_batch_to_s3(records, entity, batch_num, s3fs)
-                jsonl_paths.append(jsonl_path)
+                try:
+                    jsonl_path = write_jsonl_batch_to_s3(records, entity, batch_num, s3fs)
+                    jsonl_paths.append(jsonl_path)
+                except Exception as write_err:
+                    logger.error(
+                        "jsonl_write_failed",
+                        entity=entity,
+                        batch=batch_num,
+                        records_in_batch=len(records),
+                        error=str(write_err),
+                    )
+                    # Continue - the records are still in memory for parquet write
 
             all_records.extend(records)
             offset += len(records)
@@ -301,6 +345,7 @@ def fetch_records_streaming(
                         "memory_pressure_during_fetch",
                         entity=entity,
                         records_fetched=len(all_records),
+                        jsonl_files_written=len(jsonl_paths),
                     )
                     break
 
@@ -312,6 +357,24 @@ def fetch_records_streaming(
             time.sleep(0.1)
 
     log_memory_usage("fetch_complete")
+
+    # Log summary including any partial failure
+    if fetch_error:
+        logger.info(
+            "fetch_completed_with_partial_data",
+            entity=entity,
+            records=len(all_records),
+            jsonl_batches=len(jsonl_paths),
+            had_error=True,
+        )
+    else:
+        logger.info(
+            "fetch_completed",
+            entity=entity,
+            records=len(all_records),
+            jsonl_batches=len(jsonl_paths),
+        )
+
     return all_records, len(all_records), jsonl_paths
 
 
@@ -487,28 +550,58 @@ def write_parquet_atomic(
         print(f"[DRY RUN] Would write {table.num_rows} rows to s3://{final_path}")
         return final_path
 
-    # Write to temp path
-    pq.write_table(
-        table,
-        temp_path,
-        filesystem=s3fs,
-        compression="zstd",
-    )
+    try:
+        # Write to temp path
+        pq.write_table(
+            table,
+            temp_path,
+            filesystem=s3fs,
+            compression="zstd",
+        )
 
-    # Verify temp file exists and has expected row count
-    info = s3fs.get_file_info(temp_path)
-    if info.type != pafs.FileType.File:
-        raise RuntimeError(f"Temp file not found: {temp_path}")
+        # Verify temp file exists and has expected row count
+        info = s3fs.get_file_info(temp_path)
+        if info.type != pafs.FileType.File:
+            raise RuntimeError(f"Temp file not found after write: {temp_path}")
 
-    # Rename (copy + delete) to final path
-    # S3 doesn't have true rename, so we copy then delete
-    s3fs.copy_file(temp_path, final_path)
+        # Rename (copy + delete) to final path
+        # S3 doesn't have true rename, so we copy then delete
+        s3fs.copy_file(temp_path, final_path)
 
-    # Delete temp file
-    s3fs.delete_file(temp_path)
+        # Delete temp file
+        try:
+            s3fs.delete_file(temp_path)
+        except Exception as delete_err:
+            # Temp file cleanup failure is non-fatal - log and continue
+            logger.warning(
+                "temp_file_cleanup_failed",
+                temp_path=temp_path,
+                error=str(delete_err),
+            )
 
-    logger.info("wrote_parquet", path=final_path, rows=table.num_rows)
-    return final_path
+        logger.info("wrote_parquet", path=final_path, rows=table.num_rows)
+        return final_path
+
+    except Exception as e:
+        # Log full context for debugging
+        logger.error(
+            "parquet_write_failed",
+            entity=entity,
+            temp_path=temp_path,
+            final_path=final_path,
+            rows=table.num_rows,
+            error_type=type(e).__name__,
+            error=str(e),
+        )
+        # Try to clean up temp file if it exists
+        try:
+            info = s3fs.get_file_info(temp_path)
+            if info.type == pafs.FileType.File:
+                s3fs.delete_file(temp_path)
+                logger.info("cleaned_up_failed_temp_file", path=temp_path)
+        except Exception:
+            pass  # Best effort cleanup
+        raise
 
 
 def sync_entity(

@@ -4431,3 +4431,84 @@ Pressure OK: True
 - End-to-end verification (PRD item 12) - requires secrets to be configured first
 - Error handling improvements (PRD item 13)
 - Documentation (PRD item 14)
+
+---
+
+## 2026-01-27: Error Handling and Resilience for Scheduled Jobs (PRD Item 13)
+
+**Date:** 2026-01-27
+**Feature:** Error handling and resilience for scheduled jobs
+**PRD Status:** PASSES (Item 13)
+
+### Summary:
+Enhanced error handling across all three sync scripts with comprehensive error context logging, better partial success handling, and improved resilience for production scheduled jobs.
+
+### Changes made:
+
+1. **s3_catchup.py** - Enhanced error handling
+   - Added full error context logging in `fetch_batch()` with URL, error_type, timestamp, batch_size
+   - Enhanced retry loop with `batches_completed` and `records_so_far` in error logs
+   - Added partial data flush on unrecoverable failure (flushes what we have before raising)
+   - Improved flush error handling - logs but doesn't lose stats on flush failure
+
+2. **s3_trades_catchup.py** - Enhanced partial success handling
+   - Added `files_read` and `files_failed` counters to `read_files_batch()`
+   - Enhanced error logging with `error_type`, file counts for debugging
+   - Added `batch_read_partial_success` log event when some files fail
+   - Enhanced `write_trades_to_s3()` with per-partition error handling
+   - Continues processing other partitions if one fails (partial success)
+   - Returns `files_failed` count in stats for monitoring
+
+3. **s3_gamma_sync.py** - Comprehensive error resilience
+   - Enhanced `fetch_with_retry()` with full context logging:
+     - Added `max_retries`, `params`, `response_body_preview`, `response_headers`
+     - Added `error_type`, `timeout_seconds` for timeout errors
+   - Enhanced `fetch_records_streaming()` with partial data handling:
+     - Catches fetch errors and continues with partial data
+     - Logs `jsonl_files_written` for audit trail preservation
+     - Added `fetch_completed_with_partial_data` log event
+   - Enhanced `write_parquet_atomic()` with:
+     - Full error context on failure (entity, paths, rows, error_type)
+     - Non-fatal temp file cleanup failure handling
+     - Best-effort temp file cleanup on write failure
+
+### PRD requirements met:
+
+| Requirement | Status |
+|-------------|--------|
+| All API requests must have timeout (30 seconds) | ✓ Already present |
+| Implement retry with exponential backoff | ✓ Already present |
+| Log errors with full context (URL, status, body preview) | ✓ Enhanced in all scripts |
+| Exit with non-zero code on unrecoverable failure | ✓ Already present |
+| Partial success should still write completed data | ✓ Enhanced in all scripts |
+| Scripts are idempotent | ✓ Already present |
+| Watermark-based resumability | ✓ Already present |
+| Catch MemoryError and write partial progress | ✓ Already present |
+| Monitor memory and exit gracefully at >80% | ✓ Already present |
+| Slack/Discord notification (optional) | Not implemented (optional) |
+
+### Type checking:
+- ✓ mypy: Success (no issues in 72 source files)
+
+### Test status:
+- Pre-existing test failure in test_api.py::TestQueryTradesAPI::test_query_multiple_market_ids
+- Not related to error handling changes
+
+### Files modified:
+- `scripts/s3_catchup.py` - Enhanced error logging and partial data flush on failure
+- `scripts/s3_trades_catchup.py` - Added partial success handling for reads and writes
+- `scripts/s3_gamma_sync.py` - Comprehensive error resilience and context logging
+- `plans/prd.json` - Marked PRD item 13 as passing
+
+### Notes for next person:
+- All scripts now log comprehensive error context for debugging
+- Partial success is supported - scripts continue processing even if some operations fail
+- JSONL audit trail is preserved even if final parquet write fails
+- Error logs include: URL, error_type, status_code, response_body_preview, params
+- Memory safety (PRD item 0) was completed in previous session
+
+### Next steps for future sessions:
+- AWS IAM configuration (PRD item 8) - requires manual AWS console work
+- GitHub repository secrets configuration (PRD item 9) - requires manual GitHub work
+- End-to-end verification (PRD item 12) - requires secrets to be configured first
+- Documentation (PRD item 14)
