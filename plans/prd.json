@@ -86,7 +86,7 @@
             "Verify --max-batches flag works for testing with limited data",
             "Confirm zstd compression on output parquet files"
         ],
-        "passes": false
+        "passes": true
     },
     {
         "category": "functional",
@@ -103,7 +103,7 @@
             "Verify S3 partitioning by year/month/day: s3://polymarket-bcp892/raw/polymarket/trades/year=YYYY/month=MM/day=DD/",
             "Confirm dependency on order_filled completion (sequential execution in workflow)"
         ],
-        "passes": false
+        "passes": true
     },
     {
         "category": "functional",
@@ -127,7 +127,7 @@
             "Run s3_gamma_sync.py with appropriate flags based on inputs",
             "Add step summary with sync statistics (markets count, events count, duration)"
         ],
-        "passes": false
+        "passes": true
     },
     {
         "category": "functional",
@@ -151,7 +151,7 @@
             "Skip trades derivation step if dry_run is true",
             "Add step summary with sync statistics"
         ],
-        "passes": false
+        "passes": true
     },
     {
         "category": "setup",

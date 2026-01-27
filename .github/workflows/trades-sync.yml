@@ -1,0 +1,78 @@
+name: Trades Sync
+
+on:
+  schedule:
+    # Run every 10 minutes
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+    inputs:
+      max_batches:
+        description: 'Max batches to process (optional, for testing)'
+        required: false
+        type: number
+      dry_run:
+        description: 'Dry run (scan without writing to S3)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Sync order_filled from Goldsky
+        id: order_filled
+        run: |
+          DRY_RUN="${{ inputs.dry_run || 'false' }}"
+          MAX_BATCHES="${{ inputs.max_batches }}"
+
+          ARGS=""
+          if [ "$DRY_RUN" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          if [ -n "$MAX_BATCHES" ]; then
+            ARGS="$ARGS --max-batches $MAX_BATCHES"
+          fi
+
+          echo "Running: uv run python scripts/s3_catchup.py $ARGS"
+          uv run python scripts/s3_catchup.py $ARGS
+
+      - name: Derive trades from order_filled
+        if: ${{ inputs.dry_run != true }}
+        id: trades
+        run: |
+          echo "Running: uv run python scripts/s3_trades_catchup.py"
+          uv run python scripts/s3_trades_catchup.py
+
+      - name: Add step summary
+        if: always()
+        run: |
+          echo "## Trades Sync Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Dry Run**: ${{ inputs.dry_run || 'false' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Max Batches**: ${{ inputs.max_batches || 'unlimited' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered By**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Run Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY

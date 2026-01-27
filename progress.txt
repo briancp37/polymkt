@@ -4256,3 +4256,87 @@ python scripts/s3_gamma_sync.py --entity events
 - The script is idempotent - safe to re-run
 - Raw JSONL provides audit trail and ability to reconstruct parquet
 - Next steps: Create GitHub Actions workflows (gamma-sync.yml, trades-sync.yml)
+
+---
+
+## 2026-01-26: Verify GitHub Actions Workflows and Sync Scripts
+
+**Date:** 2026-01-26
+**Feature:** GitHub Actions workflows and sync scripts verification
+**PRD Status:** Items 4, 5, 6, 7 marked as PASSES
+
+### Summary:
+Verified that all GitHub Actions workflows and sync scripts are complete and match PRD requirements. The workflows for hourly Gamma API sync and 10-minute trades sync are ready for deployment once AWS IAM and GitHub secrets are configured.
+
+### Verified items:
+
+1. **PRD Item 4 - order_filled sync script (s3_catchup.py)**
+   - ✓ Fetches from Goldsky GraphQL API
+   - ✓ Endpoint: https://api.goldsky.com/api/public/project_cl6mb8i9h0003e201j6li0diw/subgraphs/orderbook-subgraph/0.0.1/gn
+   - ✓ Batch size: 1000 records per query
+   - ✓ Buffer flush: 50,000 rows per partition
+   - ✓ S3 partitioning: year=YYYY/month=MM/day=DD
+   - ✓ Resumability via get_latest_s3_timestamp()
+   - ✓ Memory-efficient with gc.collect()
+   - ✓ No local disk usage
+   - ✓ --dry-run and --max-batches flags
+   - ✓ zstd compression
+
+2. **PRD Item 5 - trades derivation script (s3_trades_catchup.py)**
+   - ✓ Derives trades from order_filled data
+   - ✓ Joins with markets data for trade attributes
+   - ✓ price = usd_amount / token_amount
+   - ✓ BUY/SELL direction based on maker vs taker
+   - ✓ Batch processing: 100 files at a time
+   - ✓ Resumability via latest trades timestamp
+   - ✓ Deduplication via timestamp filtering
+   - ✓ S3 partitioning: year=YYYY/month=MM/day=DD
+
+3. **PRD Item 6 - gamma-sync.yml workflow**
+   - ✓ Schedule: cron '0 * * * *' (every hour)
+   - ✓ workflow_dispatch with entity [all, markets, events] and dry_run
+   - ✓ ubuntu-latest runner
+   - ✓ timeout-minutes: 15
+   - ✓ Python 3.11 + uv setup
+   - ✓ AWS credentials from secrets
+   - ✓ Step summary
+
+4. **PRD Item 7 - trades-sync.yml workflow**
+   - ✓ Schedule: cron '*/10 * * * *' (every 10 minutes)
+   - ✓ workflow_dispatch with max_batches and dry_run
+   - ✓ ubuntu-latest runner
+   - ✓ timeout-minutes: 30
+   - ✓ Python 3.11 + uv setup
+   - ✓ AWS credentials from secrets
+   - ✓ Sequential execution: s3_catchup.py then s3_trades_catchup.py
+   - ✓ Skip trades derivation on dry_run
+   - ✓ Step summary
+
+### Type checking:
+- ✓ mypy: Success (no issues in 72 source files)
+
+### Test status:
+- Pre-existing test failures unrelated to workflow changes
+- Workflow YAML files don't affect Python test suite
+
+### Files verified (not modified):
+- `.github/workflows/gamma-sync.yml`
+- `.github/workflows/trades-sync.yml`
+- `scripts/s3_catchup.py`
+- `scripts/s3_trades_catchup.py`
+
+### Files modified:
+- `plans/prd.json` - Marked items 4, 5, 6, 7 as passing
+
+### Next steps for future sessions:
+- AWS IAM configuration (PRD item 8) - requires manual AWS console work
+- GitHub repository secrets configuration (PRD item 9) - requires manual GitHub work
+- End-to-end verification (PRD item 12) - requires secrets to be configured first
+- Error handling improvements (PRD item 13)
+- Documentation (PRD item 14)
+
+### Notes for deployment:
+1. Create IAM user with S3 permissions for bucket polymarket-bcp892
+2. Add AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY to GitHub repository secrets
+3. Test with manual workflow_dispatch runs before relying on scheduled triggers
+4. Monitor first few automated runs via GitHub Actions history

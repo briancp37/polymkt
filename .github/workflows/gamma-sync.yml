@@ -1,0 +1,73 @@
+name: Gamma API Sync
+
+on:
+  schedule:
+    # Run every hour at minute 0
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      entity:
+        description: 'Which entity to sync'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - markets
+          - events
+      dry_run:
+        description: 'Dry run (scan API without writing to S3)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Run Gamma API sync
+        id: sync
+        run: |
+          ENTITY="${{ inputs.entity || 'all' }}"
+          DRY_RUN="${{ inputs.dry_run || 'false' }}"
+
+          ARGS="--entity $ENTITY"
+          if [ "$DRY_RUN" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+
+          echo "Running: uv run python scripts/s3_gamma_sync.py $ARGS"
+          uv run python scripts/s3_gamma_sync.py $ARGS
+
+      - name: Add step summary
+        if: always()
+        run: |
+          echo "## Gamma API Sync Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Entity**: ${{ inputs.entity || 'all' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Dry Run**: ${{ inputs.dry_run || 'false' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered By**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Run Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
