@@ -86,10 +86,10 @@ BATCH_SIZE = 1000  # Records per Goldsky query
 BUFFER_FLUSH_THRESHOLD = 50000  # Rows per partition before flush
 MAX_MEMORY_MB = 2000  # Conservative memory limit
 # Goldsky rate limit: 300 requests/minute = 5 req/sec
-# Use 0.5s delay = 2 req/sec (40% of limit, very safe margin)
-# This is conservative but avoids rate limit issues
-REQUEST_DELAY_SECONDS = 0.5
-RATE_LIMIT_BACKOFF_SECONDS = 60  # Backoff after hitting 429 (full minute)
+# Use 0.2s delay = 5 req/sec (matches limit exactly)
+# With httpx we have full control - no hidden retries
+REQUEST_DELAY_SECONDS = 0.2
+RATE_LIMIT_BACKOFF_SECONDS = 10  # Short backoff - rate limits typically reset quickly
 
 # Schema for order_filled
 ORDER_FILLED_SCHEMA = pa.schema([
@@ -401,6 +401,7 @@ def run_catchup(
     batch_count = 0
     total_fetched = 0
     consecutive_empty = 0
+    rate_limit_hits = 0
 
     print("\nStarting fetch loop...")
     log_memory_usage("start")
@@ -428,9 +429,10 @@ def run_catchup(
                 is_rate_limit = e.response.status_code == 429
 
                 if is_rate_limit:
-                    # Rate limited: use fixed long backoff
+                    # Rate limited: use fixed backoff
+                    rate_limit_hits += 1
                     delay = RATE_LIMIT_BACKOFF_SECONDS
-                    print(f"Rate limited (429) - backing off for {delay}s...")
+                    print(f"Rate limited (429) #{rate_limit_hits} - backing off for {delay}s...")
                 else:
                     # Other HTTP errors: exponential backoff
                     delay = 2 ** retry_count
@@ -561,6 +563,7 @@ def run_catchup(
     print(f"Files created: {final_stats['files_written']}")
     print(f"Duration: {elapsed:.1f}s")
     print(f"Rate: {total_fetched / elapsed:.0f} records/s" if elapsed > 0 else "")
+    print(f"Rate limit hits (429s): {rate_limit_hits}")
 
     return {
         "batches": batch_count,
