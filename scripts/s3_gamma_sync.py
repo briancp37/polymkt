@@ -171,6 +171,7 @@ def _extract_tag_labels(tags: list[dict[str, Any]] | None) -> list[str]:
     return result
 
 
+
 def read_existing_parquet(
     entity: str,
     s3fs: pafs.S3FileSystem,
@@ -285,11 +286,51 @@ def fetch_with_retry(
     raise RuntimeError(f"Max retries ({MAX_RETRIES}) exceeded for {url}")
 
 
+def _write_progress_parquet(
+    entity: str,
+    existing_table: pa.Table | None,
+    new_records: list[dict[str, Any]],
+    s3fs: pafs.S3FileSystem,
+) -> None:
+    """Write a progress parquet combining existing data + new records fetched so far.
+
+    This is called periodically during fetch so that if the process is killed
+    (e.g., GitHub Actions 15-min timeout), the next run can resume from this point.
+    """
+    if not new_records:
+        return
+
+    if entity == "markets":
+        new_table = transform_markets(new_records)
+    elif entity == "events":
+        new_table = transform_events(new_records)
+    else:
+        return
+
+    if existing_table is not None:
+        table = pa.concat_tables([existing_table, new_table])
+    else:
+        table = new_table
+
+    try:
+        write_parquet_atomic(table, entity, s3fs)
+        logger.info("wrote_progress_parquet", entity=entity, rows=table.num_rows)
+        print(f"  [progress] Wrote {entity} parquet with {table.num_rows:,} rows")
+    except Exception as e:
+        logger.warning("progress_parquet_write_failed", entity=entity, error=str(e))
+
+    del table, new_table
+
+
+PROGRESS_INTERVAL = 20  # Write progress parquet every N batches (10,000 records)
+
+
 def fetch_records_streaming(
     entity: str,
     s3fs: pafs.S3FileSystem,
     dry_run: bool = False,
     start_offset: int = 0,
+    existing_table: pa.Table | None = None,
 ) -> tuple[list[dict[str, Any]], int, list[str]]:
     """Fetch records for an entity with streaming JSONL writes to S3.
 
@@ -297,8 +338,8 @@ def fetch_records_streaming(
     immediately after fetching. Returns all records for final parquet transformation,
     but memory is bounded by gc.collect() after each batch.
 
-    Partial success: If fetching fails partway through, already-written JSONL files
-    are preserved for audit trail and potential recovery.
+    Periodically writes progress parquet so that if the process is killed (e.g.,
+    GitHub Actions timeout), the next run can resume from the last checkpoint.
 
     Returns:
         Tuple of (all_records, total_count, jsonl_paths)
@@ -374,6 +415,10 @@ def fetch_records_streaming(
             offset += len(records)
 
             print(f"  Batch {batch_num}: fetched {len(records)} {entity}, total: {len(all_records)}")
+
+            # Periodically write progress parquet (survives process kill)
+            if not dry_run and batch_num % PROGRESS_INTERVAL == 0:
+                _write_progress_parquet(entity, existing_table, all_records, s3fs)
 
             # Periodic memory check and cleanup
             if batch_num % 10 == 0:
@@ -662,9 +707,15 @@ def sync_entity(
     # Read existing parquet for incremental sync
     existing_table, existing_count = read_existing_parquet(entity, s3fs)
 
-    # Fetch only new records (starting from existing count offset)
+    # Resume from existing parquet row count
+    start_offset = existing_count
+    if start_offset > 0:
+        print(f"  Resuming from offset {start_offset:,}")
+
+    # Fetch only new records (passes existing_table for periodic progress writes)
     records, new_count, jsonl_paths = fetch_records_streaming(
-        entity, s3fs, dry_run=dry_run, start_offset=existing_count,
+        entity, s3fs, dry_run=dry_run, start_offset=start_offset,
+        existing_table=existing_table,
     )
     print(f"Fetched {new_count} new {entity} records (existing: {existing_count:,})")
 
@@ -712,7 +763,8 @@ def sync_entity(
     gc.collect()
     log_memory_usage("pre_parquet_write")
 
-    # Write parquet atomically
+    # Write parquet atomically — this persists progress so the next run
+    # can resume from table.num_rows even if this run is killed after this point.
     parquet_path = write_parquet_atomic(table, entity, s3fs, dry_run=dry_run)
     print(f"Wrote parquet to s3://{parquet_path}")
 
@@ -721,7 +773,7 @@ def sync_entity(
 
     return {
         "entity": entity,
-        "records": total_count,
+        "records": table.num_rows,
         "rows": table.num_rows,
         "jsonl_batches": len(jsonl_paths),
         "parquet_path": f"s3://{parquet_path}",
