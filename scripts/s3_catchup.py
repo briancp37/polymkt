@@ -523,6 +523,11 @@ def run_catchup(
             f"ts: {dt.strftime('%Y-%m-%d %H:%M')}"
         )
 
+        # Partial batch = caught up to present, stop fetching
+        if len(records) < BATCH_SIZE:
+            print(f"\nCaught up to present (partial batch: {len(records)}/{BATCH_SIZE})")
+            break
+
         # Periodic GC and memory check
         if batch_count % 50 == 0:
             gc.collect()
