@@ -171,6 +171,43 @@ def _extract_tag_labels(tags: list[dict[str, Any]] | None) -> list[str]:
     return result
 
 
+def read_existing_parquet(
+    entity: str,
+    s3fs: pafs.S3FileSystem,
+) -> tuple[pa.Table | None, int]:
+    """Read existing parquet file from S3 for incremental sync.
+
+    Returns:
+        Tuple of (existing_table, row_count). Returns (None, 0) if not found.
+    """
+    parquet_path = f"{S3_BUCKET}/{S3_PREFIX}/{entity}.parquet"
+    try:
+        info = s3fs.get_file_info(parquet_path)
+        if info.type != pafs.FileType.File:
+            logger.info("no_existing_parquet", entity=entity, path=parquet_path)
+            return None, 0
+
+        table = pq.read_table(parquet_path, filesystem=s3fs)
+        logger.info(
+            "read_existing_parquet",
+            entity=entity,
+            rows=table.num_rows,
+            path=parquet_path,
+        )
+        print(f"  Found existing {entity} parquet with {table.num_rows:,} rows")
+        return table, table.num_rows
+
+    except Exception as e:
+        logger.warning(
+            "existing_parquet_read_failed",
+            entity=entity,
+            path=parquet_path,
+            error=str(e),
+        )
+        print(f"  Could not read existing parquet for {entity}: {e}")
+        return None, 0
+
+
 def fetch_with_retry(
     client: httpx.Client,
     url: str,
@@ -252,6 +289,7 @@ def fetch_records_streaming(
     entity: str,
     s3fs: pafs.S3FileSystem,
     dry_run: bool = False,
+    start_offset: int = 0,
 ) -> tuple[list[dict[str, Any]], int, list[str]]:
     """Fetch records for an entity with streaming JSONL writes to S3.
 
@@ -267,12 +305,15 @@ def fetch_records_streaming(
     """
     url = f"{GAMMA_API_BASE}/{entity}"
     all_records: list[dict[str, Any]] = []
-    offset = 0
+    offset = start_offset
     batch_num = 0
     jsonl_paths: list[str] = []
     fetch_error: Exception | None = None
 
-    print(f"Fetching {entity} from Gamma API (streaming mode)...")
+    if start_offset > 0:
+        print(f"Fetching {entity} from Gamma API (incremental, starting at offset {start_offset:,})...")
+    else:
+        print(f"Fetching {entity} from Gamma API (full fetch)...")
     log_memory_usage("fetch_start")
 
     with httpx.Client() as client:
@@ -618,30 +659,53 @@ def sync_entity(
     # Get S3 filesystem
     s3fs = _get_s3_filesystem()
 
-    # Fetch all records with streaming JSONL writes (memory-safe)
-    records, total_count, jsonl_paths = fetch_records_streaming(entity, s3fs, dry_run=dry_run)
-    print(f"Fetched {total_count} {entity} records")
+    # Read existing parquet for incremental sync
+    existing_table, existing_count = read_existing_parquet(entity, s3fs)
 
-    if not records:
+    # Fetch only new records (starting from existing count offset)
+    records, new_count, jsonl_paths = fetch_records_streaming(
+        entity, s3fs, dry_run=dry_run, start_offset=existing_count,
+    )
+    print(f"Fetched {new_count} new {entity} records (existing: {existing_count:,})")
+
+    if not records and existing_table is not None:
+        print(f"No new {entity} records - existing data is up to date")
+        return {
+            "entity": entity,
+            "records": existing_count,
+            "new_records": 0,
+            "dry_run": dry_run,
+        }
+
+    if not records and existing_table is None:
         print(f"No {entity} records to sync")
         return {
             "entity": entity,
             "records": 0,
+            "new_records": 0,
             "dry_run": dry_run,
         }
 
     if not dry_run:
         print(f"Wrote {len(jsonl_paths)} JSONL batch files to S3")
 
-    # Transform to parquet schema
+    # Transform new records to parquet schema
     if entity == "markets":
-        table = transform_markets(records)
+        new_table = transform_markets(records)
     elif entity == "events":
-        table = transform_events(records)
+        new_table = transform_events(records)
     else:
         raise ValueError(f"Unknown entity: {entity}")
 
-    print(f"Transformed {table.num_rows} rows")
+    # Merge with existing data
+    if existing_table is not None:
+        table = pa.concat_tables([existing_table, new_table])
+        del existing_table
+        print(f"Merged: {existing_count:,} existing + {new_table.num_rows:,} new = {table.num_rows:,} total rows")
+    else:
+        table = new_table
+
+    del new_table
 
     # Clear records from memory before parquet write
     del records
