@@ -61,7 +61,7 @@ jobs:
           uv run python scripts/s3_catchup.py $ARGS
 
       - name: Derive trades from order_filled
-        if: ${{ inputs.dry_run != true }}
+        if: ${{ always() && inputs.dry_run != true }}
         id: trades
         run: |
           echo "Running: uv run python scripts/s3_trades_catchup.py"

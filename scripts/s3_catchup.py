@@ -429,9 +429,9 @@ def run_catchup(
                 is_rate_limit = e.response.status_code == 429
 
                 if is_rate_limit:
-                    # Rate limited: use fixed backoff
+                    # Rate limited: exponential backoff starting at RATE_LIMIT_BACKOFF_SECONDS
                     rate_limit_hits += 1
-                    delay = RATE_LIMIT_BACKOFF_SECONDS
+                    delay = RATE_LIMIT_BACKOFF_SECONDS * (2 ** (retry_count - 1))
                     print(f"Rate limited (429) #{rate_limit_hits} - backing off for {delay}s...")
                 else:
                     # Other HTTP errors: exponential backoff
@@ -461,7 +461,9 @@ def run_catchup(
                         )
                     except Exception as flush_err:
                         logger.error("flush_on_failure_failed", error=str(flush_err))
-                    raise RuntimeError(f"Max retries ({max_fetch_retries}) exceeded fetching from Goldsky") from e
+                    logger.warning("max_retries_exceeded", retries=max_fetch_retries, source="Goldsky")
+                    print(f"Max retries ({max_fetch_retries}) exceeded - partial data flushed, exiting gracefully")
+                    break
                 time.sleep(delay)
                 continue
             except Exception as e:
@@ -487,7 +489,9 @@ def run_catchup(
                         buffer.flush_all()
                     except Exception as flush_err:
                         logger.error("flush_on_failure_failed", error=str(flush_err))
-                    raise RuntimeError(f"Max retries ({max_fetch_retries}) exceeded fetching from Goldsky") from e
+                    logger.warning("max_retries_exceeded", retries=max_fetch_retries, source="Goldsky")
+                    print(f"Max retries ({max_fetch_retries}) exceeded - partial data flushed, exiting gracefully")
+                    break
                 time.sleep(delay)
                 continue
 
