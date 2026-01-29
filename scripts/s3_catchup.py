@@ -334,6 +334,16 @@ def fetch_batch(client: httpx.Client, last_timestamp: int, batch_size: int = 100
     # httpx has NO internal retries - we control everything
     response = client.post(GOLDSKY_URL, json=query, timeout=30)
 
+    # Log full response details for non-200 or any error diagnosis
+    if response.status_code != 200:
+        print(f"\n--- HTTP {response.status_code} Response Debug ---")
+        print(f"Headers: {dict(response.headers)}")
+        try:
+            print(f"Body: {response.text[:2000]}")
+        except Exception:
+            print(f"Body: (could not read)")
+        print("--- End Response Debug ---\n")
+
     # Check for rate limit BEFORE raising for status
     if response.status_code == 429:
         raise httpx.HTTPStatusError(
@@ -343,6 +353,11 @@ def fetch_batch(client: httpx.Client, last_timestamp: int, batch_size: int = 100
         )
 
     response.raise_for_status()
+
+    # Log response headers on success too (first few batches) for rate limit diagnostics
+    rate_headers = {k: v for k, v in response.headers.items() if "rate" in k.lower() or "retry" in k.lower() or "remaining" in k.lower() or "limit" in k.lower()}
+    if rate_headers:
+        print(f"Rate limit headers: {rate_headers}")
 
     result = response.json()
     if "errors" in result:
